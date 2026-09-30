@@ -93,11 +93,13 @@ const EXAMPLE_OUT = JSON.stringify({
   image_prompt: "A tall wobbling tower of mismatched teacups balanced on one small open palm, the stack leaning, the top cup cracked and spilling a thin line of amber tea down the wrist. Chipped white porcelain with blue patterns, warm light from one side, deep shadow.",
 });
 
+// Last resort only (the writer didn't answer). Big single subjects, so even a
+// fallback reads at a glance.
 const DEFAULT_SCENES = {
-  tender: "two small figures sitting close on a hillside at dusk, one leaning into the other, warm ochre grass, soft pink and violet sky",
-  angry: "a kettle boiling over on a red-hot stove, steam tearing upward, clashing reds and oranges",
-  distant: "two paper boats drifting apart on a wide still blue lake, cold pale light",
-  nostalgic: "a child's bicycle lying in long golden grass beside an old house, faded turquoise sky, late afternoon light",
+  tender: "two figures filling the frame, foreheads pressed together, eyes closed, warm ochres and soft pinks",
+  angry: "a huge kettle boiling over on a red-hot stove, steam tearing upward, clashing reds and oranges",
+  distant: "one large paper boat in the foreground drifting away from an outstretched hand, cold blues and pale light",
+  nostalgic: "a child's bicycle lying large in long golden grass, faded turquoise sky, late afternoon light",
 };
 
 // messages: [{ side: "me" | "them", kind: "text" | "deleted" | "typing", text }]
@@ -114,6 +116,13 @@ export function sceneMessages(messages, mood) {
     { role: "assistant", content: EXAMPLE_OUT },
     { role: "user", content: `Conversation:\n${transcript}\n\n${moodLine}\nReturn the JSON now.` },
   ];
+}
+
+// Did the scene writer actually answer with a usable scene (or a refusal)?
+export function isSceneReply(raw) {
+  const parsed = typeof raw === "object" && raw ? raw : parseJson(String(raw ?? ""));
+  if (parsed?.refused === true) return true;
+  return typeof parsed?.image_prompt === "string" && parsed.image_prompt.trim().length >= 20;
 }
 
 // The scene writer's reply → { refused: true } or a clean scene. A composition

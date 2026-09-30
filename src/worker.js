@@ -2,7 +2,7 @@
 // conversation → scene JSON (Llama) → painting (FLUX.1 schnell).
 // Nothing is stored: messages pass through and are gone.
 
-import { COMPOSITIONS, sceneMessages, readScene, imagePrompt } from "../public/scene.js";
+import { COMPOSITIONS, sceneMessages, readScene, imagePrompt, isSceneReply } from "../public/scene.js";
 
 // The scene writer decides whether the painting reads emotionally, so it defaults
 // to Llama 3.3 70B. It costs more of the free daily allowance than 8B; set
@@ -69,7 +69,10 @@ async function paint(request, env) {
   // 3. Scene
   const scene = await writeScene(env, clean, mood, composition);
 
-  // 4. Refusal
+  // 4. No scene, or a refusal
+  if (!scene) {
+    return json({ error: "The scene writer didn't answer properly, so nothing was painted. Try again in a moment." }, 502);
+  }
   if (scene.refused) {
     return json({ error: "We can't paint this one. Try a different conversation.", refused: true }, 422);
   }
@@ -88,20 +91,28 @@ async function paint(request, env) {
   return json({ image: `data:image/jpeg;base64,${result.image}`, scene });
 }
 
+// Returns null when the writer doesn't produce a usable scene after a retry:
+// better no painting than a stock one that has nothing to do with the words.
 async function writeScene(env, messages, mood, composition) {
-  let raw = "";
-  try {
-    const out = await env.AI.run(env.SCENE_MODEL || DEFAULT_SCENE_MODEL, {
-      messages: sceneMessages(messages, mood),
-      max_tokens: 500,
-      temperature: 0.8,
-    });
-    raw = out?.response ?? "";
-  } catch (err) {
-    if (isQuotaError(err)) throw err;
-    console.error("scene model failed", err);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let raw = "";
+    try {
+      const out = await env.AI.run(env.SCENE_MODEL || DEFAULT_SCENE_MODEL, {
+        messages: sceneMessages(messages, mood),
+        max_tokens: 500,
+        temperature: 0.8,
+      });
+      raw = out?.response ?? "";
+    } catch (err) {
+      if (isQuotaError(err)) throw err;
+      console.error("scene model failed", err);
+    }
+    if (isSceneReply(raw)) return readScene(raw, mood, composition);
+    // The model's own safety refusal comes back as prose, not JSON.
+    const scene = readScene(raw, mood, composition);
+    if (scene.refused) return scene;
   }
-  return readScene(raw, mood, composition);
+  return null;
 }
 
 // ── rate limit ──────────────────────────────────────────────────────────────

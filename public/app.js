@@ -1267,6 +1267,7 @@
     const sorted = Array.from(energy.filter((_, i) => i % 7 === 0)).sort((a, b) => a - b);
     const eMid = sorted[Math.floor(sorted.length * 0.55)] || 1;
     const eHigh = sorted[Math.floor(sorted.length * 0.8)] || 1;
+    const eTop = sorted[Math.floor(sorted.length * 0.93)] || 1;
 
     const palette = kmeansPalette(sd, 12, rnd);
     const hand = rnd() * Math.PI; // stroke direction where the forms don't say otherwise
@@ -1291,7 +1292,8 @@
     const layers = [
       { r: 34, keep: () => true },
       { r: 18, keep: (e) => e > eMid || rnd() < 0.35 },
-      { r: 9, keep: (e) => e > eHigh },
+      { r: 9, keep: (e) => e > eHigh || rnd() < 0.08 },
+      { r: 5, keep: (e) => e > eTop }, // small details (faces, hands, a boat) survive
     ];
     let count = 0;
     for (const layer of layers) {
@@ -1660,28 +1662,43 @@
   // Pollinations: an OpenAI-compatible text endpoint for the scene, and FLUX
   // for the painting. No key; slower and less predictable than Workers AI.
   async function previewPainting(messages) {
-    const { sceneMessages, readScene, imagePrompt } = await import("./scene.js");
+    const { sceneMessages, readScene, imagePrompt, isSceneReply } = await import("./scene.js");
     const chat = sceneMessages(messages, state.mood);
-    let raw;
-    try {
+    const content = (j) => {
+      const m = j?.choices?.[0]?.message;
+      return m?.content || m?.reasoning_content || (typeof j === "string" ? j : "");
+    };
+    const post = (model) => async () => {
       const res = await fetch("https://text.pollinations.ai/openai", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: "openai", messages: chat, seed: randSeed() }),
+        body: JSON.stringify({ model, messages: chat, seed: randSeed() }),
       });
-      if (!res.ok) throw new Error(String(res.status));
-      raw = (await res.json())?.choices?.[0]?.message?.content ?? "";
-    } catch {
-      // Fall back to the plain GET endpoint (system prompt + last turn only).
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`);
+      return content(await res.json());
+    };
+    const get = async () => {
+      const system = `${chat[0].content}\n\nExample reply:\n${chat[2].content}`;
+      const res = await fetch(`https://text.pollinations.ai/${encodeURIComponent(chat[3].content)}` +
+        `?model=openai&json=true&seed=${randSeed()}&system=${encodeURIComponent(system)}`);
+      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`);
+      return res.text();
+    };
+
+    // Try a few routes; never paint a stock scene when the writer didn't answer.
+    let raw = null;
+    let last = "";
+    for (const attempt of [post("openai"), get, post("mistral")]) {
       try {
-        const system = `${chat[0].content}\n\nExample reply:\n${chat[2].content}`;
-        const res = await fetch(`https://text.pollinations.ai/${encodeURIComponent(chat[3].content)}` +
-          `?model=openai&json=true&seed=${randSeed()}&system=${encodeURIComponent(system)}`);
-        if (!res.ok) throw new Error(String(res.status));
-        raw = await res.text();
-      } catch {
-        throw new Error("Couldn't reach the preview scene writer. Try again in a moment.");
+        const reply = await attempt();
+        if (isSceneReply(reply)) { raw = reply; break; }
+        last = String(reply).slice(0, 140);
+      } catch (err) {
+        last = String(err.message || err).slice(0, 140);
       }
+    }
+    if (raw === null) {
+      throw new Error(`The scene writer didn't answer properly, so nothing was painted. Try again in a moment.\n(Reply: ${last || "empty"})`);
     }
     const scene = readScene(raw, state.mood, state.composition);
     if (scene.refused) throw new Error("We can't paint this one. Try a different conversation.");
@@ -1772,6 +1789,7 @@
 
   function setStatus(text, error = false, scene = false) {
     els.status.textContent = text;
+    els.status.style.whiteSpace = "pre-line";
     els.status.classList.toggle("error", error);
     els.status.classList.toggle("scene-core", scene);
   }
