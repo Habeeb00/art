@@ -19,20 +19,40 @@
   const MAX_CHARS = 300;
   const DEMO = new URLSearchParams(location.search).has("demo");
 
+  // Each chat style has a dark and a light theme; the theme follows whatever is
+  // behind the bubbles, like a phone in dark or light mode.
   const STYLES = {
     whatsapp: {
-      bg: "#0B141A",
-      me: "#005C4B", them: "#202C33",
-      meText: "#E9EDEF", themText: "#E9EDEF",
-      meMeta: "rgba(233,237,239,0.62)", themMeta: "rgba(233,237,239,0.62)",
-      deleted: "rgba(233,237,239,0.62)",
-      tick: "#53BDEB",
+      dark: {
+        bg: "#0B141A",
+        me: "#005C4B", them: "#202C33",
+        meText: "#E9EDEF", themText: "#E9EDEF",
+        meMeta: "rgba(233,237,239,0.62)", themMeta: "rgba(233,237,239,0.62)",
+        deleted: "rgba(233,237,239,0.62)", dots: "#8696A0",
+        tick: "#53BDEB",
+      },
+      light: {
+        bg: "#EFEAE2",
+        me: "#D9FDD3", them: "#FFFFFF",
+        meText: "#111B21", themText: "#111B21",
+        meMeta: "rgba(17,27,33,0.5)", themMeta: "rgba(17,27,33,0.5)",
+        deleted: "rgba(17,27,33,0.55)", dots: "#8696A0",
+        tick: "#53BDEB",
+      },
     },
     imessage: {
-      bg: "#FFFFFF",
-      me: "#0A84FF", them: "#E9E9EB",
-      meText: "#FFFFFF", themText: "#000000",
-      deleted: "#8E8E93",
+      dark: {
+        bg: "#000000",
+        me: "#0A84FF", them: "#26252A",
+        meText: "#FFFFFF", themText: "#FFFFFF",
+        deleted: "#8E8E93", dots: "#8E8E93",
+      },
+      light: {
+        bg: "#FFFFFF",
+        me: "#0A84FF", them: "#E9E9EB",
+        meText: "#FFFFFF", themText: "#000000",
+        deleted: "#8E8E93", dots: "#8E8E93",
+      },
     },
   };
 
@@ -85,8 +105,11 @@
     mood: "auto",
     showMeta: true,
     startTime: "23:41",
-    amount: 55,
+    amount: 30,
     composition: "auto",
+    autoComposition: "full", // set from the scene writer's choice when a painting arrives
+    raw: null,              // the square painting as generated
+    paintGround: [8, 8, 8], // flat background colour of a cut-out painting
     paintingId: 0,
     painting: null,     // HTMLCanvasElement, painting cropped to 1080×1350
     paintData: null,    // Uint8ClampedArray of the painting's pixels
@@ -129,7 +152,7 @@
       input.maxLength = MAX_CHARS;
       input.value = m.text;
       input.placeholder = m.side === "me" ? "What you said…" : "What they said…";
-      input.disabled = m.kind === "deleted";
+      input.disabled = m.kind !== "text";
       input.setAttribute("aria-label", `Message ${i + 1}`);
       input.addEventListener("input", () => {
         m.text = input.value;
@@ -142,10 +165,18 @@
         }
       });
 
-      const kind = button("kind", "deleted", "Show as a deleted message");
-      kind.setAttribute("aria-pressed", String(m.kind === "deleted"));
-      kind.addEventListener("click", () => {
-        m.kind = m.kind === "deleted" ? "text" : "deleted";
+      const kind = document.createElement("select");
+      kind.className = "kind";
+      kind.setAttribute("aria-label", "Message type");
+      for (const [value, label] of [["text", "text"], ["deleted", "deleted"], ["typing", "typing…"]]) {
+        const o = document.createElement("option");
+        o.value = value;
+        o.textContent = label;
+        o.selected = m.kind === value;
+        kind.append(o);
+      }
+      kind.addEventListener("change", () => {
+        m.kind = kind.value;
         renderList();
         scheduleRender();
       });
@@ -218,14 +249,26 @@
     return `${h12}:${String(m).padStart(2, "0")} ${upper ? ampm.toUpperCase() : ampm}`;
   }
 
+  function formatTime24(mins) {
+    return `${pad(Math.floor(mins / 60) % 24)}:${pad(mins % 60)}`;
+  }
+
+  // "Mon, 14 Aug at 23:41", the way iMessage stamps a conversation.
+  function formatStamp(mins) {
+    const d = new Date();
+    const day = d.toLocaleDateString("en-GB", { weekday: "short" });
+    const month = d.toLocaleDateString("en-GB", { month: "short" });
+    return `${day}, ${d.getDate()} ${month} at ${formatTime24(mins)}`;
+  }
+
   // ── layout ─────────────────────────────────────────────────────────────────
   function visibleMessages() {
     return state.messages
-      .filter((m) => m.kind === "deleted" || m.text.trim())
+      .filter((m) => m.kind !== "text" || m.text.trim())
       .map((m) => ({ ...m, text: m.text.trim() }));
   }
 
-  function layoutAt(scale) {
+  function layoutAt(scale, bleed) {
     const style = state.style;
     const fs = FONT_SIZE * scale;
     const lh = LINE_H * scale;
@@ -240,14 +283,14 @@
     let y = 0;
 
     if (style === "imessage" && state.showMeta && visible.length) {
-      items.push({ type: "header", y, h: metaFs * 1.4, text: `Today ${formatTime(times[0], true)}` });
+      items.push({ type: "header", y, h: metaFs * 1.4, text: formatStamp(times[0]) });
       y += metaFs * 1.4 + 18 * scale;
     }
 
     // iMessage shows deletions as a centred note rather than a bubble.
     const isNote = (m) => style === "imessage" && m?.kind === "deleted";
     const sideOf = (m) => (m && !isNote(m) ? m.side : null);
-    const lastMe = visible.reduce((acc, m, i) => (sideOf(m) === "me" ? i : acc), -1);
+    const lastMe = visible.reduce((acc, m, i) => (sideOf(m) === "me" && m.kind !== "typing" ? i : acc), -1);
 
     visible.forEach((m, i) => {
       const side = sideOf(m);
@@ -258,6 +301,20 @@
       if (isNote(m)) {
         items.push({ type: "note", y, h: metaFs * 1.5, text: m.side === "me" ? "You unsent a message" : "They unsent a message" });
         y += metaFs * 1.5;
+        return;
+      }
+
+      const shift = m.side === "me" ? bleed : 0;
+      const tail = style === "whatsapp"
+        ? (first ? (m.side === "me" ? "tr" : "tl") : null)
+        : (last ? (m.side === "me" ? "br" : "bl") : null);
+
+      if (m.kind === "typing") {
+        const w = 118 * scale;
+        const h = lh + padY * 2;
+        const x = m.side === "me" ? W - SIDE_MARGIN - w + shift : SIDE_MARGIN;
+        items.push({ type: "bubble", typing: true, x, y, w, h, side: m.side, lines: [], meta: null, tail: style === "imessage" ? tail : null, index: i });
+        y += h;
         return;
       }
 
@@ -287,16 +344,14 @@
 
       const h = lines.length * lh + padY * 2 + extraH;
       const w = Math.max(contentW + padX * 2, RADIUS * scale * 2 + 12);
-      const x = m.side === "me" ? W - SIDE_MARGIN - w : SIDE_MARGIN;
-      const tail = style === "whatsapp"
-        ? (first ? (m.side === "me" ? "tr" : "tl") : null)
-        : (last ? (m.side === "me" ? "br" : "bl") : null);
+      const x = m.side === "me" ? W - SIDE_MARGIN - w + shift : SIDE_MARGIN;
 
       items.push({ type: "bubble", x, y, w, h, side: m.side, deleted, lines, meta, tail, index: i });
       y += h;
 
       if (style === "imessage" && state.showMeta && i === lastMe) {
-        items.push({ type: "receipt", y: y + 6 * scale, h: metaFs * 1.3, x: x + w, text: i === visible.length - 1 ? "Delivered" : "Read" });
+        const read = i < visible.length - 1 ? `Read ${formatTime24(times[i] + 1 + (i % 3))}` : "Delivered";
+        items.push({ type: "receipt", y: y + 6 * scale, h: metaFs * 1.3, x: Math.min(x + w, W - 20), text: read });
         y += metaFs * 1.3 + 6 * scale;
       }
     });
@@ -304,14 +359,21 @@
     return { items, height: y, scale, fs, lh, padX, padY, metaFs, radius: RADIUS * scale };
   }
 
-  function layout() {
+  // A few messages get big, confident type; long conversations shrink to fit.
+  function layout(look) {
     const margin = 96;
-    let lay = layoutAt(1);
-    for (let s = 0.95; lay.height > H - margin * 2 && s >= 0.5; s -= 0.05) lay = layoutAt(s);
+    const compact = look && (look.composition === "cutout" || look.composition === "torn");
+    const target = H * (compact ? 0.4 : 0.52);
+    const bleed = look?.bleed || 0;
+    let s = 1.4;
+    let lay = layoutAt(s, bleed);
+    while (s > 1 && lay.height > target) lay = layoutAt((s -= 0.05), bleed);
+    while (lay.height > H - margin * 2 && s > 0.5) lay = layoutAt((s -= 0.05), bleed);
 
-    const space = state.scene?.negative_space || "centre";
+    // The words sit in the painting's calm space; a cut-out's subject sits below them.
+    const space = look?.composition === "cutout" ? "top" : state.scene?.negative_space || "centre";
     let top;
-    if (space === "top") top = margin;
+    if (space === "top") top = margin * 1.1;
     else if (space === "bottom") top = H - margin - lay.height;
     else top = (H - lay.height) / 2;
     top = Math.max(margin * 0.6, top);
@@ -350,18 +412,34 @@
 
   // ── drawing: background ────────────────────────────────────────────────────
   function drawPlain() {
-    ctx.fillStyle = STYLES[state.style].bg;
+    ctx.fillStyle = STYLES[state.style][state.style === "whatsapp" ? "dark" : "light"].bg;
     ctx.fillRect(0, 0, W, H);
     ctx.drawImage(grain(), 0, 0, W, H);
   }
 
   // ── drawing: bubbles ───────────────────────────────────────────────────────
   function drawItems(lay) {
-    const S = STYLES[state.style];
+    const S = STYLES[state.style][bubbleTheme(lay)];
     for (const it of lay.items) {
       if (it.type === "bubble") drawBubble(it, lay, S);
       else drawCaption(it, lay);
     }
+  }
+
+  // Dark bubbles on dark paintings and bare black, light bubbles on light ones.
+  function bubbleTheme(lay) {
+    if (!state.painting) return state.style === "whatsapp" ? "dark" : "light";
+    let sum = 0;
+    let n = 0;
+    for (const it of lay.items) {
+      if (it.type !== "bubble") continue;
+      for (let k = 0; k < 6; k++) {
+        const x = k % 2 ? it.x - 20 : it.x + it.w + 20;
+        sum += bgLuminance(x, it.y + (it.h * (Math.floor(k / 2) + 0.5)) / 3);
+        n++;
+      }
+    }
+    return n && sum / n > 125 ? "light" : "dark";
   }
 
   function drawCaption(it, lay) {
@@ -393,8 +471,21 @@
     ctx.fillStyle = me ? S.me : S.them;
     ctx.fill();
 
+    if (b.typing) {
+      const cy = b.y + b.h / 2;
+      for (let k = 0; k < 3; k++) {
+        ctx.fillStyle = S.dots;
+        ctx.globalAlpha = 0.55 + k * 0.2;
+        ctx.beginPath();
+        ctx.arc(b.x + b.w / 2 + (k - 1) * 26 * lay.scale, cy, 9 * lay.scale, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      return;
+    }
+
     ctx.font = `${b.deleted ? "italic " : ""}${lay.fs}px ${FF}`;
-    ctx.fillStyle = b.deleted ? (state.style === "whatsapp" ? S.deleted : me ? S.meText : S.themText) : me ? S.meText : S.themText;
+    ctx.fillStyle = b.deleted ? S.deleted : me ? S.meText : S.themText;
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
     b.lines.forEach((line, i) => {
@@ -475,19 +566,25 @@
   }
 
   // ── look: composition + the painter's hand ─────────────────────────────────
-  // Each painting (and each Remix) gets its own composition and its own mix of
-  // tools, so no two pieces are worked the same way.
+  // The composition comes with the painting (the scene writer picks a cut-out,
+  // a scene or a paper doodle); each Remix re-rolls the hand: its mix of tools,
+  // whether a bubble runs off the edge, whether the subject steps in front.
   function pickLook() {
     const rnd = mulberry32(state.strokeSeed ^ 0x5bd1e995);
-    const auto = weighted(rnd, { full: 0.4, torn: 0.35, island: 0.25 });
+    const composition = state.composition === "auto" ? state.autoComposition : state.composition;
+    const paper = composition === "paper";
     return {
-      composition: state.composition === "auto" ? auto : state.composition,
-      ground: rnd() < 0.55 ? [13, 11, 10] : [236, 228, 212],
+      composition,
+      ground: composition === "cutout" ? state.paintGround
+        : paper ? [250, 248, 243]
+        : rnd() < 0.6 ? [8, 8, 8] : [246, 244, 239],
+      bleed: rnd() < 0.25 ? 20 + rnd() * 60 : 0,
+      occlude: composition === "cutout" && rnd() < 0.8,
       hand: {
         bristle: 0.25 + rnd() * 0.75,
-        knife: rnd() * 0.8,
+        knife: paper ? rnd() * 0.3 : rnd() * 0.8,
         dab: rnd() * 0.7,
-        scribble: rnd() < 0.65 ? 0.2 + rnd() * 0.8 : 0,
+        scribble: paper ? 0.6 + rnd() * 0.4 : rnd() < 0.5 ? 0.2 + rnd() * 0.6 : 0,
       },
     };
   }
@@ -509,22 +606,22 @@
     bubbles.forEach((b, j) => {
       const rnd = mulberry32(state.strokeSeed + j * 7919);
       const palette = samplePalette(b, rnd);
-      const quiet = look.composition === "full" ? 1 : 0.7; // torn edges already do some of the work
-      let treatment = weighted(rnd, {
-        clean: 0.45 - 0.35 * a,
-        edge: 0.35 * quiet,
-        corner: 0.22,
-        halo: 0.14,
-        swallow: b.w > 220 && swallowed < maxSwallow ? 0.04 + 0.4 * a * a : 0,
-        scribble: look.hand.scribble * 0.35,
+      // Most bubbles stay clean: the painting meets the words through the
+      // composition. Paint on a bubble is the exception, and a paper doodle is
+      // the one place it gets busy.
+      const comp = look.composition;
+      const treatment = b.typing ? "clean" : weighted(rnd, {
+        clean: (comp === "cutout" ? 1.8 : comp === "paper" ? 0.35 : 0.95) - 0.55 * a,
+        edge: 0.3,
+        corner: 0.15,
+        halo: 0.08,
+        swallow: b.w > 220 && swallowed < maxSwallow && comp !== "cutout" ? 0.02 + 0.4 * a * a : 0,
+        scribble: look.hand.scribble * (comp === "paper" ? 1 : 0.25),
       });
       const add = (s) => strokes.push(makeStroke(rnd, palette, look, s));
       const perim = 2 * (b.w + b.h);
 
-      if (treatment === "clean") {
-        if (rnd() < 0.4) add(edgeStroke(b, rnd() * perim, rnd, a, false));
-        return;
-      }
+      if (treatment === "clean") return;
 
       if (treatment === "edge") {
         const u0 = rnd() * perim;
@@ -602,6 +699,23 @@
         });
       }
     });
+
+    // Paper doodles: black ink pen lines scribbled over paint and paper alike.
+    if (look.composition === "paper") {
+      const rnd = mulberry32(state.strokeSeed ^ 0x1b873593);
+      const palette = [[40, 40, 40]];
+      const n = 4 + Math.round(rnd() * 5 + a * 6);
+      for (let k = 0; k < n; k++) {
+        const b = bubbles.length && rnd() < 0.35 ? bubbles[Math.floor(rnd() * bubbles.length)] : null;
+        const e = b ? edgePoint(b, rnd() * 2 * (b.w + b.h)) : null;
+        strokes.push(makeStroke(rnd, palette, look, {
+          tool: "scribble", ink: true,
+          x: e ? e.x + e.nx * 20 : rnd() * W, y: e ? e.y + e.ny * 20 : H * (0.3 + rnd() * 0.7),
+          angle: (rnd() - 0.5) * 2, size: 60 + rnd() * 160, width: 2 + rnd() * 2,
+          kind: weighted(rnd, { zigzag: 1.2, loop: 0.8, wave: 0.6 }), over: true,
+        }));
+      }
+    }
     return strokes;
   }
 
@@ -629,7 +743,7 @@
       bend: 0.25,
       ...s,
       type: tool === "dab" ? "bristle" : tool,
-      color: tool === "scribble" ? saturate(c1, 1.5) : c1,
+      color: s.ink ? [26, 24, 22] : tool === "scribble" ? saturate(c1, 1.5) : c1,
       color2: c2,
       dry: s.dry ?? 0.1 + rnd() * 0.5,
       seed: Math.floor(rnd() * 2 ** 31),
@@ -995,9 +1109,10 @@
   }
 
   // ── compositions ───────────────────────────────────────────────────────────
-  // full:   the painting fills the frame.
+  // full:   the painting fills the frame, bubbles laid simply on top.
   // torn:   bare ground where the words sit, painting beyond a torn, brushy edge.
-  // island: the painting is a ragged patch on bare ground, bubbles overhanging it.
+  // cutout: the subject alone on flat black or white; it can step in front of bubbles.
+  // paper:  a doodle on white paper, bare paper left around the words.
   function buildMask(look, lay) {
     const m = document.createElement("canvas");
     m.width = W;
@@ -1008,16 +1123,23 @@
     const blockTop = lay.top;
     const blockBottom = lay.top + lay.height;
 
-    if (look.composition === "island") {
-      const x0 = 40 + rnd() * 90;
-      const x1 = W - 40 - rnd() * 90;
-      const y0 = Math.min(blockTop + 40, 80 + rnd() * 140);
-      const y1 = Math.max(blockBottom - 40, H - 80 - rnd() * 140);
-      g.fillRect(x0 + 70, y0 + 70, x1 - x0 - 140, y1 - y0 - 140);
+    if (look.composition === "paper") {
+      // Paint everywhere, then scrub bare paper back around the words.
+      const bubbles = lay.items.filter((it) => it.type === "bubble");
+      const minX = Math.min(...bubbles.map((b) => b.x), W / 2);
+      const maxX = Math.max(...bubbles.map((b) => b.x + b.w), W / 2);
+      const x0 = minX < 120 ? -60 : minX - 50;
+      const x1 = maxX > W - 120 ? W + 60 : maxX + 50;
+      const y0 = blockTop - 40 - rnd() * 40;
+      const y1 = blockBottom + 20 + rnd() * 40;
+      g.fillRect(0, 0, W, H);
+      g.globalCompositeOperation = "destination-out";
+      g.fillRect(x0 + 60, y0 + 60, x1 - x0 - 120, y1 - y0 - 120);
       raggedEdge(g, x0, y0, x1, y0, 0, 1, rnd, 200);
       raggedEdge(g, x1, y0, x1, y1, -1, 0, rnd, 200);
       raggedEdge(g, x1, y1, x0, y1, 0, -1, rnd, 200);
       raggedEdge(g, x0, y1, x0, y0, 1, 0, rnd, 200);
+      g.globalCompositeOperation = "source-over";
       return m;
     }
 
@@ -1106,6 +1228,10 @@
     const g = c.getContext("2d");
     if (look.composition === "full") {
       g.drawImage(state.painting, 0, 0);
+    } else if (look.composition === "cutout") {
+      g.fillStyle = rgba(look.ground, 1);
+      g.fillRect(0, 0, W, H);
+      g.drawImage(cutoutLayer(), 0, 0);
     } else {
       g.fillStyle = rgba(look.ground, 1);
       g.fillRect(0, 0, W, H);
@@ -1122,6 +1248,44 @@
     bgCache = { key, canvas: c };
     bgLumData = g.getImageData(0, 0, W, H).data;
     return c;
+  }
+
+  // The square painting sits at the bottom of the frame with its flat
+  // background keyed out, so only the subject remains.
+  let cutoutCache = { id: -1, canvas: null };
+  function cutoutLayer() {
+    if (cutoutCache.id === state.paintingId) return cutoutCache.canvas;
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const g = c.getContext("2d");
+    g.drawImage(state.raw, 0, H - W, W, W);
+    const img = g.getImageData(0, 0, W, H);
+    const d = img.data;
+    const [gr, gg, gb] = state.paintGround;
+    for (let i = 0; i < d.length; i += 4) {
+      if (!d[i + 3]) continue;
+      const diff = Math.max(Math.abs(d[i] - gr), Math.abs(d[i + 1] - gg), Math.abs(d[i + 2] - gb));
+      d[i + 3] = clampN(((diff - 14) / 30) * 255, 0, 255);
+    }
+    g.putImageData(img, 0, 0);
+    cutoutCache = { id: state.paintingId, canvas: c };
+    return c;
+  }
+
+  // The subject steps in front of the bubbles, but never over the words.
+  const occluder = document.createElement("canvas");
+  function drawOccluder(lay) {
+    occluder.width = W;
+    occluder.height = H;
+    const g = occluder.getContext("2d");
+    g.drawImage(cutoutLayer(), 0, 0);
+    for (const it of lay.items) {
+      if (it.type === "bubble") {
+        g.clearRect(it.x + lay.padX * 0.6, it.y + lay.padY * 0.5, it.w - lay.padX * 1.2, it.h - lay.padY);
+      }
+    }
+    ctx.drawImage(occluder, 0, 0);
   }
 
   let bgLumData = null;
@@ -1158,12 +1322,13 @@
 
   function render() {
     const look = pickLook();
-    const lay = layout();
+    const lay = layout(look);
     const strokes = generateStrokes(lay, look);
     if (state.painting) ctx.drawImage(background(look, lay), 0, 0);
     else drawPlain();
     for (const s of strokes) if (!s.over) paintStroke(ctx, s);
     drawItems(lay);
+    if (state.painting && look.occlude) drawOccluder(lay);
     for (const s of strokes) if (s.over) paintStroke(ctx, s);
     if (state.painting) {
       // A whisper of canvas grain over everything, so the bubbles sit in the paint.
@@ -1204,14 +1369,14 @@
     setBusy(true);
     try {
       let data;
-      if (DEMO) data = await demoPainting();
+      if (DEMO) data = await demoPainting(state.composition);
       else {
         let res;
         try {
           res = await fetch("/api/paint", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ messages, mood: state.mood }),
+            body: JSON.stringify({ messages, mood: state.mood, composition: state.composition }),
           });
         } catch {
           throw new Error("Couldn't reach the painter. Check your connection and try again.");
@@ -1221,6 +1386,7 @@
       }
       await setPainting(data.image);
       state.scene = data.scene || null;
+      state.autoComposition = compositionFor(state.scene?.treatment);
       state.strokeSeed = randSeed();
       render();
       setStatus(state.scene?.emotional_core ? `“${state.scene.emotional_core}”` : "Painted.", false, true);
@@ -1229,6 +1395,12 @@
     } finally {
       setBusy(false);
     }
+  }
+
+  function compositionFor(treatment) {
+    if (treatment === "cutout") return "cutout";
+    if (treatment === "doodle") return "paper";
+    return Math.random() < 0.6 ? "full" : "torn";
   }
 
   async function setPainting(src) {
@@ -1243,8 +1415,29 @@
     const dh = img.naturalHeight * s;
     g.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
     state.painting = c;
+    state.raw = img;
+    state.paintGround = borderColour(img);
     state.paintingId++;
     state.paintData = g.getImageData(0, 0, W, H).data;
+  }
+
+  // Median colour around the painting's edge: the flat ground of a cut-out.
+  function borderColour(img) {
+    const c = document.createElement("canvas");
+    c.width = 64;
+    c.height = 64;
+    const g = c.getContext("2d");
+    g.drawImage(img, 0, 0, 64, 64);
+    const d = g.getImageData(0, 0, 64, 64).data;
+    const px = [];
+    for (let i = 0; i < 64; i++) {
+      for (const [x, y] of [[i, 0], [i, 1], [0, i], [63, i]]) {
+        const k = (y * 64 + x) * 4;
+        px.push([d[k], d[k + 1], d[k + 2]]);
+      }
+    }
+    const mid = (ch) => px.map((p) => p[ch]).sort((a, b) => a - b)[px.length >> 1];
+    return [mid(0), mid(1), mid(2)];
   }
 
   function loadImage(src) {
@@ -1299,8 +1492,8 @@
     }, "image/png");
   }
 
-  // ── demo painting (?demo): no network, exercises the stroke engine ─────────
-  async function demoPainting() {
+  // ── demo painting (?demo): no network, exercises the compositions ────────
+  async function demoPainting(composition) {
     await new Promise((r) => setTimeout(r, 600));
     const size = 1024;
     const c = document.createElement("canvas");
@@ -1308,42 +1501,60 @@
     c.height = size;
     const g = c.getContext("2d");
     const rnd = mulberry32(randSeed());
-    const palettes = [
-      { sky: [[128, 206, 222], [236, 150, 170], [250, 240, 230]], ground: [[222, 178, 48], [196, 140, 36], [240, 206, 90]], accent: [[196, 40, 60], [240, 236, 228], [110, 60, 50]] },
-      { sky: [[40, 120, 210], [90, 180, 230], [240, 240, 250]], ground: [[40, 140, 70], [120, 180, 60], [30, 90, 60]], accent: [[240, 90, 140], [250, 210, 60], [230, 60, 40]] },
-    ];
-    const p = palettes[Math.floor(rnd() * palettes.length)];
-    const horizon = size * (0.35 + rnd() * 0.2);
-    g.fillStyle = rgba(p.sky[0], 1);
-    g.fillRect(0, 0, size, horizon);
-    g.fillStyle = rgba(p.ground[0], 1);
-    g.fillRect(0, horizon, size, size - horizon);
     const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
-    for (let i = 0; i < 520; i++) {
-      const sky = i < 220;
-      const y = sky ? rnd() * horizon : horizon + rnd() * (size - horizon);
-      drawStroke(g, {
-        x: rnd() * size, y,
-        angle: sky ? (rnd() - 0.5) * 0.6 : -0.9 + (rnd() - 0.5) * 0.8,
-        len: 60 + rnd() * 180, width: 14 + rnd() * 34,
-        color: pick(sky ? p.sky : p.ground), color2: pick(sky ? p.sky : p.ground),
-        dry: 0.1 + rnd() * 0.4, seed: Math.floor(rnd() * 2 ** 31),
-      });
+    const treatment = composition === "cutout" ? "cutout"
+      : composition === "paper" ? "doodle"
+      : composition === "auto" ? pick(["cutout", "scene", "doodle"]) : "scene";
+    const stroke = (x, y, angle, len, width, colors, dry = 0.1 + rnd() * 0.4) => drawStroke(g, {
+      x, y, angle, len, width, color: pick(colors), color2: pick(colors), dry, seed: Math.floor(rnd() * 2 ** 31),
+    });
+
+    if (treatment === "cutout") {
+      // One lumpy subject on flat black or white.
+      const dark = rnd() < 0.6;
+      g.fillStyle = dark ? "#080808" : "#f7f6f2";
+      g.fillRect(0, 0, size, size);
+      const colors = pick([[[90, 170, 230], [235, 240, 245], [40, 80, 160]], [[230, 70, 60], [250, 200, 80], [120, 30, 40]]]);
+      for (let i = 0; i < 260; i++) {
+        const t = rnd();
+        const cx = size * 0.5 + (rnd() - 0.5) * size * (0.25 + 0.35 * t);
+        const cy = size * (0.3 + 0.7 * t);
+        stroke(cx, cy, rnd() * Math.PI, 40 + rnd() * 120, 18 + rnd() * 30, colors);
+      }
+    } else {
+      const palettes = [
+        { sky: [[128, 206, 222], [236, 150, 170], [250, 240, 230]], ground: [[222, 178, 48], [196, 140, 36], [240, 206, 90]], accent: [[196, 40, 60], [240, 236, 228], [110, 60, 50]] },
+        { sky: [[40, 120, 210], [90, 180, 230], [240, 240, 250]], ground: [[40, 140, 70], [120, 180, 60], [30, 90, 60]], accent: [[240, 90, 140], [250, 210, 60], [230, 60, 40]] },
+      ];
+      const p = pick(palettes);
+      const horizon = size * (0.35 + rnd() * 0.2);
+      if (treatment === "doodle") {
+        g.fillStyle = "#faf8f3";
+        g.fillRect(0, 0, size, size);
+      } else {
+        g.fillStyle = rgba(p.sky[0], 1);
+        g.fillRect(0, 0, size, horizon);
+        g.fillStyle = rgba(p.ground[0], 1);
+        g.fillRect(0, horizon, size, size - horizon);
+      }
+      const n = treatment === "doodle" ? 180 : 520;
+      for (let i = 0; i < n; i++) {
+        const sky = i < n * 0.42;
+        const y = sky ? rnd() * horizon : horizon + rnd() * (size - horizon);
+        stroke(rnd() * size, y, sky ? (rnd() - 0.5) * 0.6 : -0.9 + (rnd() - 0.5) * 0.8, 60 + rnd() * 180, 14 + rnd() * 34, sky ? p.sky : p.ground);
+      }
+      const fx = size * (0.3 + rnd() * 0.4);
+      const fy = horizon + (size - horizon) * 0.45;
+      for (let i = 0; i < 60; i++) {
+        stroke(fx + (rnd() - 0.5) * 220, fy + (rnd() - 0.5) * 160, rnd() * 6.28, 40 + rnd() * 90, 16 + rnd() * 26, p.accent, 0.2 + rnd() * 0.3);
+      }
     }
-    const fx = size * (0.3 + rnd() * 0.4);
-    const fy = horizon + (size - horizon) * 0.45;
-    for (let i = 0; i < 60; i++) {
-      drawStroke(g, {
-        x: fx + (rnd() - 0.5) * 220, y: fy + (rnd() - 0.5) * 160,
-        angle: rnd() * 6.28, len: 40 + rnd() * 90, width: 16 + rnd() * 26,
-        color: pick(p.accent), color2: pick(p.accent),
-        dry: 0.2 + rnd() * 0.3, seed: Math.floor(rnd() * 2 ** 31),
-      });
-    }
-    const spaces = ["top", "centre", "bottom"];
     return {
       image: c.toDataURL("image/jpeg", 0.92),
-      scene: { emotional_core: "Demo painting: random paint, not AI.", mood: "demo", negative_space: spaces[Math.floor(rnd() * 3)] },
+      scene: {
+        emotional_core: "Demo painting: random paint, not AI.", mood: "demo", treatment,
+        negative_space: pick(["top", "centre", "bottom"]),
+      },
     };
   }
 

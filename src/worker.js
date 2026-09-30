@@ -1,5 +1,5 @@
 // Unsaid — /api/paint
-// conversation → scene JSON (Llama 3.1 8B) → painting (FLUX.1 schnell).
+// conversation → scene JSON (Llama) → painting (FLUX.1 schnell).
 // Nothing is stored: messages pass through and are gone.
 
 // The scene writer decides whether the painting reads emotionally, so it defaults
@@ -14,49 +14,68 @@ const MAX_BODY_BYTES = 20_000;
 const MOODS = ["auto", "tender", "angry", "distant", "nostalgic"];
 const SPACES = ["top", "centre", "bottom"];
 
-// The house style. Tune this until 8 out of 10 results feel like the same painter.
-const STYLE =
-  "expressive oil painting on canvas, thick impasto, visible bristle and palette knife marks, " +
-  "naive expressionist figures with simple faces and readable body language, bold saturated colour, " +
-  "loose broken edges, unfinished raw areas, hand-painted, emotional storytelling, no text, no letters";
+const COMPOSITIONS = ["auto", "full", "torn", "cutout", "paper"];
+const TREATMENTS = ["cutout", "scene", "doodle"];
+
+// The house style, one phrase per treatment. Tune these until 8 out of 10
+// results feel like the same painter.
+const BRUSH =
+  "expressive oil painting, thick impasto, visible bristle and palette knife marks, bold saturated colour, " +
+  "loose broken edges, naive expressionist, hand-painted, no text, no letters";
+const STYLES = {
+  scene: `${BRUSH}, the whole canvas painted edge to edge, unfinished raw areas`,
+  cutout: (ground) =>
+    `a single subject isolated on a plain flat pure ${ground} background, nothing else in the frame, ` +
+    `the subject large and filling the lower two thirds, empty ${ground} space above it, ${BRUSH}, raw brushy edges`,
+  doodle:
+    "naive childlike painting on white paper, thick oil pastel and gouache, scribbled black ink pen lines and doodles, " +
+    "bright saturated blues reds yellows and greens, white paper showing through, playful and messy, no text, no letters",
+};
 
 const SPACE_HINT = {
-  top: "the upper third is calm open sky or loose empty brushwork with no figures",
-  centre: "the middle of the canvas is calm and open, figures and detail pushed to the edges",
-  bottom: "the lower third is calm open ground or loose empty brushwork with no figures",
+  top: "the upper third is calm and empty",
+  centre: "the middle of the canvas is calm and open, detail pushed to the edges",
+  bottom: "the lower third is calm and empty",
 };
 
 const SCENE_PROMPT = `You are the art director for a painter who turns text conversations into
 expressive oil paintings. A stranger scrolling past must FEEL what is going on
-between these people in one second, without reading a single message.
+in one second, without reading a single message.
 
 How to find the painting:
-1. Work out what is really happening: who wants what, who is pulling away,
-   who is holding back, what nobody is saying.
-2. Show it as ONE clear human moment: one or two simple, naive figures whose
-   bodies carry the feeling. Use gesture and distance: backs turned, a hand
-   reaching and not arriving, a wide gap between them, one lying in the grass,
-   a hug that doesn't hold, one figure walking away small in the distance,
-   someone sitting alone beside an empty space.
-3. Add ONE symbolic detail that makes it land: an arrow through a heart, a door
-   left open, a kite caught in a tree, a bridge that doesn't meet in the middle,
-   a wilting flower, a second empty chair, rain falling on only one of them.
-4. Let colour, light and weather carry the mood: warm golds and pinks for
-   tenderness, clashing reds and oranges for anger, cold blues and big empty
-   space for distance, faded yellows and turquoise for nostalgia, deep violets
-   and night for grief.
-5. Use ordinary places people know: a rooftop, a bus stop, a playground, a
-   kitchen, a beach at dusk, a train window, a hospital corridor. If the
-   conversation uses Malayalam or Manglish, paint Kerala: paddy fields,
-   coconut palms, a veranda, monsoon rain, a KSRTC bus.
+1. Work out what is really happening underneath the words: who wants what,
+   who is pulling away, what nobody is saying.
+2. Find the phrase or feeling at the heart of it and paint it LITERALLY, as
+   one big, clear subject. The best paintings take a figure of speech at its
+   word: "I'm fine" becomes a tower of teacups balanced on one trembling hand;
+   "I miss you" becomes a cup of chai going cold opposite an empty chair;
+   "I feel stuck" becomes a kite knotted in electric wires above a busy road;
+   "we'll figure it out" becomes two small figures sharing one umbrella,
+   wading across a flooded monsoon road; "leave me alone" becomes a
+   lighthouse turning its beam inward. If a message already contains an
+   image (a dragon, the moon, bones, a dream), paint that image.
+3. One subject, big in the frame, in a tight palette of two or three colours
+   that carry the mood.
+4. If the conversation uses Malayalam or Manglish, set it in Kerala: paddy
+   fields, coconut palms, a veranda, monsoon rain, a KSRTC bus.
+
+Choose a treatment:
+- "cutout": a single object or figure is the whole idea. It is painted alone
+  on a flat black or white ground. Choose "ground": "black" for heavy, lonely
+  or night feelings, "white" for brittle, bright or ironic ones.
+- "scene": the feeling needs a place around the subject.
+- "doodle": playful, hopeful, chaotic or arguing conversations, painted like a
+  child's drawing on paper with ink scribbles.
 
 Return ONLY valid JSON, no preamble, no markdown:
 {
   "subtext": "one plain sentence: what is really going on",
   "emotional_core": "a short poetic line, max 12 words, naming the unsaid feeling",
   "mood": "one or two words",
+  "treatment": "cutout | scene | doodle",
+  "ground": "black | white",
   "negative_space": "top | centre | bottom",
-  "image_prompt": "50-80 words. Start with the figures and exactly what their bodies are doing, then the symbolic detail, then the setting, light and colour palette."
+  "image_prompt": "40-70 words. Name the subject first and exactly what it is doing, then its colours and light. For a scene, then the setting."
 }
 
 Rules:
@@ -66,27 +85,29 @@ Rules:
 - If the conversation is sexual, hateful, or romantic/sexual involving a
   minor, return {"refused": true}.`;
 
-// One worked example anchors the model on concrete, readable scenes.
+// One worked example anchors the model on concrete, literal subjects.
 const EXAMPLE_IN = `Conversation:
-Them: I love you but we shouldn't speak
-Me: okay
-Me: if that's what you want
+Them: how are you holding up?
+Me: honestly I'm fine
+Me: busy is good
 
-The mood should lean tender.
+Decide the mood yourself.
 Return the JSON now.`;
 const EXAMPLE_OUT = JSON.stringify({
-  subtext: "They still love each other, but one has decided it has to end, and the other is pretending to accept it.",
-  emotional_core: "Loved, and still asked to go quiet.",
-  mood: "tender grief",
+  subtext: "They are not fine; they are staying busy so they don't have to feel it.",
+  emotional_core: "Busy enough not to feel it.",
+  mood: "brittle",
+  treatment: "cutout",
+  ground: "black",
   negative_space: "top",
-  image_prompt: "A small figure in a white shirt lies curled on their side in a golden wheat field, one arm stretched toward nothing, a thin red arrow standing upright from their chest. Far off at the horizon, a second tiny figure walks away. Wind flattens the tall yellow grass. Pale turquoise sky with pink streaks, late afternoon light, warm ochres against cold blue.",
+  image_prompt: "A tall wobbling tower of mismatched teacups balanced on one small open palm, the stack leaning, the top cup cracked and spilling a thin line of amber tea down the wrist. Chipped white porcelain with blue patterns, warm light from one side, deep shadow.",
 });
 
 const DEFAULT_SCENES = {
-  tender: "two small figures sitting close on a hillside at dusk, one leaning into the other, warm ochre grass, soft pink and violet sky, a single tree bending over them",
-  angry: "a lone figure standing in a field under a burning red and orange sky, wind tearing through tall yellow grass, a dark house far away with one lit window",
-  distant: "two figures on opposite banks of a wide blue river, a broken bridge between them, cold green hills, pale sky streaked with white and lilac",
-  nostalgic: "a child's bicycle lying in long golden grass beside an old house, faded turquoise sky, washing on a line, late afternoon light in thick yellow strokes",
+  tender: "two small figures sitting close on a hillside at dusk, one leaning into the other, warm ochre grass, soft pink and violet sky",
+  angry: "a kettle boiling over on a red-hot stove, steam tearing upward, clashing reds and oranges",
+  distant: "two paper boats drifting apart on a wide still blue lake, cold pale light",
+  nostalgic: "a child's bicycle lying in long golden grass beside an old house, faded turquoise sky, late afternoon light",
 };
 
 export default {
@@ -126,14 +147,15 @@ async function paint(request, env) {
   const clean = [];
   for (const m of messages) {
     const side = m?.side === "me" ? "me" : "them";
-    const deleted = m?.kind === "deleted";
+    const kind = m?.kind === "deleted" || m?.kind === "typing" ? m.kind : "text";
     const text = typeof m?.text === "string" ? m.text.trim() : "";
     if (text.length > MAX_CHARS) return json({ error: `Keep each message under ${MAX_CHARS} characters.` }, 400);
-    if (!deleted && !text) continue;
-    clean.push({ side, text, deleted });
+    if (kind === "text" && !text) continue;
+    clean.push({ side, text, kind });
   }
-  if (!clean.length) return json({ error: "Write at least one message." }, 400);
+  if (!clean.some((m) => m.kind !== "typing")) return json({ error: "Write at least one message." }, 400);
   const mood = MOODS.includes(body?.mood) ? body.mood : "auto";
+  const composition = COMPOSITIONS.includes(body?.composition) ? body.composition : "auto";
 
   // 2. Per-IP daily limit (only when KV is bound)
   const limitKey = await checkLimit(request, env);
@@ -141,6 +163,10 @@ async function paint(request, env) {
 
   // 3. Scene
   const scene = await writeScene(env, clean, mood);
+  // A composition picked on the page overrides the scene writer's treatment.
+  if (!scene.refused && composition !== "auto") {
+    scene.treatment = composition === "cutout" ? "cutout" : composition === "paper" ? "doodle" : "scene";
+  }
 
   // 4. Refusal
   if (scene.refused) {
@@ -148,7 +174,9 @@ async function paint(request, env) {
   }
 
   // 5. Painting
-  const prompt = `${scene.image_prompt}. Composition: ${SPACE_HINT[scene.negative_space]}. ${STYLE}`;
+  const style = scene.treatment === "cutout" ? STYLES.cutout(scene.ground) : STYLES[scene.treatment];
+  const hint = scene.treatment === "cutout" ? "" : ` Composition: ${SPACE_HINT[scene.negative_space]}.`;
+  const prompt = `${scene.image_prompt}.${hint} ${style}`;
   const result = await env.AI.run(IMAGE_MODEL, {
     prompt: prompt.slice(0, 2000),
     steps: 8,
@@ -164,7 +192,9 @@ async function paint(request, env) {
 
 async function writeScene(env, messages, mood) {
   const transcript = messages
-    .map((m) => `${m.side === "me" ? "Me" : "Them"}: ${m.deleted ? "[deleted a message]" : m.text}`)
+    .map((m) => `${m.side === "me" ? "Me" : "Them"}: ${
+      m.kind === "deleted" ? "[deleted a message]" : m.kind === "typing" ? "[starts typing… then nothing]" : m.text
+    }`)
     .join("\n");
   const moodLine = mood === "auto" ? "Decide the mood yourself." : `The mood should lean ${mood}.`;
 
@@ -202,6 +232,8 @@ function normaliseScene(s, mood) {
     subtext: str(s?.subtext, 300),
     emotional_core: str(s?.emotional_core, 120) || "Something is being said around, not through.",
     mood: str(s?.mood, 30) || fallbackMood,
+    treatment: TREATMENTS.includes(s?.treatment) ? s.treatment : "scene",
+    ground: s?.ground === "white" ? "white" : "black",
     negative_space: SPACES.includes(s?.negative_space) ? s.negative_space : s?.negative_space === "center" ? "centre" : "top",
     image_prompt: prompt.length >= 20 ? prompt.slice(0, 900) : DEFAULT_SCENES[fallbackMood],
   };

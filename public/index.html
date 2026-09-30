@@ -284,10 +284,11 @@
         <div>
           <label for="composition">Composition</label>
           <select id="composition">
-            <option value="auto">Surprise me</option>
+            <option value="auto">Let it decide</option>
+            <option value="cutout">Cut-out</option>
             <option value="full">Full painting</option>
             <option value="torn">Torn edge</option>
-            <option value="island">Paint island</option>
+            <option value="paper">Paper doodle</option>
           </select>
         </div>
         <div>
@@ -325,11 +326,11 @@
 
       <div class="amount">
         <label class="field-label" for="amount">Paint amount</label>
-        <input id="amount" type="range" min="0" max="100" value="55">
+        <input id="amount" type="range" min="0" max="100" value="30">
       </div>
 
       <div class="actions">
-        <button id="repaint" type="button" disabled title="New strokes and composition, instant and free">Remix</button>
+        <button id="repaint" type="button" disabled title="New strokes and details, instant and free">Remix</button>
         <button id="again" type="button" disabled title="New scene and painting">New painting</button>
         <button id="download" class="download" type="button">Download</button>
       </div>

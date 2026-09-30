@@ -51,39 +51,49 @@ at 00:00 UTC / 5:30 AM IST).
 | File | What |
 | --- | --- |
 | `wrangler.toml` | AI binding, static assets, optional KV |
-| `src/worker.js` | `/api/paint`: validate → rate limit → scene → painting. The house **style phrase** and **scene prompt** live at the top; tune them. |
+| `src/worker.js` | `/api/paint`: validate → rate limit → scene → painting. The **style phrases** (one per treatment) and **scene prompt** live at the top; tune them. |
 | `public/index.html` | Page, composer, preview |
-| `public/app.js` | Bubble layout (WhatsApp / iMessage), compositions, brush tools, download |
+| `public/app.js` | Bubbles (WhatsApp / iMessage, light and dark), compositions, brush tools, download |
 | `public/strokes/` | Optional scanned brush-stroke PNGs, see its README |
 
-## How each piece varies
+## How each piece looks
 
-Every painting, and every **Remix**, picks:
+The scene writer picks a **treatment** with the painting, and the page lays it out:
 
-- **A composition**: full painting; torn edge (bare black or raw-canvas ground
-  where the words sit, the painting beyond a brushy torn edge); or a paint island
-  with bubbles hanging off its edges. Choose one or leave it on *Surprise me*.
-- **A hand**: its own mix of bristle brush, palette knife, impasto dabs and
-  oil-pastel scribbles.
-- **A treatment per bubble**: left clean, worked along one stretch of edge, a
-  cluster at one corner, a halo underneath, scribbled on, or partly swallowed
-  by the painting (the tail end of the line goes under, so it still reads).
+- **Cut-out**: one subject alone on flat black or white. The words sit in the
+  empty space above it, and the subject can step in front of the bubbles
+  (never over the words).
+- **Full painting**: edge to edge, bubbles laid simply on top.
+- **Torn edge**: bare black or white where the words sit, the painting beyond a
+  torn, brushy edge.
+- **Paper doodle**: a childlike painting on white paper with ink scribbles,
+  bare paper scrubbed back around the words. The one busy, scribbled-on look.
+
+You can also pick one yourself. Bubbles follow what's behind them (dark
+bubbles on dark paint, light on light), a few messages get big type, and
+iMessage gets its date stamp, "Read 23:47" receipts and **typing…** dots.
+
+Most bubbles stay clean. **Paint amount** decides how often one gets worked:
+a stretch of edge, a corner, a halo, scribbles, or the painting swallowing the
+tail end of the line. **Remix** re-rolls those details, the brush mix, whether
+a bubble runs off the edge and whether the subject steps in front. It's
+instant and free.
 
 ## Scenes that read
 
-The scene writer is asked for one readable human moment (figures whose body
-language carries the feeling), one symbolic detail, and colour and weather
-that match the mood, anchored by a worked example. It defaults to Llama 3.3
-70B (`SCENE_MODEL` in `wrangler.toml`), which reads subtext far better than 8B
-but uses more of the free daily allowance. Switch back to 8B for more
-paintings a day. `?demo` paintings are random local paint and never match the
-words.
+The scene writer finds the phrase or feeling at the heart of the conversation
+and paints it **literally**, as one big subject in a tight palette. For
+example, "I'm fine" becomes a tower of teacups on one trembling hand. Its
+examples are original, not taken from *Mixed Messages*. It defaults to Llama
+3.3 70B (`SCENE_MODEL` in `wrangler.toml`), which reads subtext far better than
+8B but uses more of the free daily allowance. `?demo` paintings are random
+local paint and never match the words.
 
 ## Tuning
 
-- **Style phrase** (`STYLE` in `src/worker.js`): tune until 8 of 10 results feel like the same painter.
-- **Paint amount** slider: stroke count and how far strokes bite into bubbles. Above ~60%, strokes occasionally cross a word.
-- **Remix** is instant and free (new strokes and composition). **New painting** spends allowance.
+- **Style phrases** (`STYLES` in `src/worker.js`): tune until 8 of 10 results feel like the same painter.
+- **Paint amount** slider: how many bubbles get paint and how far it bites in. Above ~60%, strokes occasionally cross a word.
+- **Remix** is instant and free. **New painting** spends allowance.
 
 ## Privacy
 
