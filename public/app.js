@@ -1266,6 +1266,12 @@
       state.strokeSeed = randSeed();
       render();
       setStatus(state.scene?.emotional_core ? `“${state.scene.emotional_core}”` : "Painted.", false, true);
+      if (PREVIEW && state.scene) {
+        // No console on a phone: show what the scene writer decided, for screenshots.
+        const sc = state.scene;
+        els.status.textContent += `\n\n${sc.treatment}${sc.treatment === "cutout" ? ` on ${sc.ground}` : ""} · ${sc.mood}\n${sc.subtext}\n\n${sc.image_prompt}`;
+        els.status.style.whiteSpace = "pre-line";
+      }
     } catch (err) {
       setStatus(err.message || "Something went wrong. Try again.", true);
     } finally {
