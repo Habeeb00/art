@@ -1,0 +1,24 @@
+name = "unsaid"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+
+# The page (public/) and the API live in one project: same origin, no CORS, no keys.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+# Workers AI: Llama 3.1 8B (scene) + FLUX.1 schnell (painting), free daily allowance.
+[ai]
+binding = "AI"
+
+[vars]
+# Paintings per IP per day. Only enforced when the LIMITS KV namespace is bound.
+DAILY_LIMIT = "3"
+
+# Optional per-IP rate limit. Create it with:
+#   npx wrangler kv namespace create LIMITS
+# then uncomment and paste the id.
+# [[kv_namespaces]]
+# binding = "LIMITS"
+# id = "paste-your-namespace-id-here"
