@@ -187,7 +187,8 @@
     .note { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
 
     /* preview */
-    .preview { position: sticky; top: 16px; }
+    /* Pinned beside the composer on wide screens only; on phones it scrolls normally. */
+    @media (min-width: 861px) { .preview { position: sticky; top: 16px; } }
     .frame {
       position: relative;
       border-radius: 12px;
@@ -230,6 +231,7 @@
       color: var(--muted);
     }
     .status.error { color: #ff8a8a; }
+    .status { overflow-wrap: anywhere; }
     .scene-core { font-family: var(--display); font-style: italic; color: var(--ink); }
 
     .amount { margin-top: 14px; }

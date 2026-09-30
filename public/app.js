@@ -1308,7 +1308,7 @@
     const scene = readScene(raw, state.mood, state.composition);
     if (scene.refused) throw new Error("We can't paint this one. Try a different conversation.");
     const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt(scene))}` +
-      `?width=1024&height=1024&model=flux&nologo=true&seed=${randSeed()}`;
+      `?width=1024&height=1024&model=flux&nologo=true&enhance=false&private=true&seed=${randSeed()}`;
     console.info("Unsaid preview scene", scene);
     return { image: url, scene };
   }

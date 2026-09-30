@@ -6,16 +6,19 @@ export const COMPOSITIONS = ["auto", "full", "torn", "cutout"];
 const TREATMENTS = ["cutout", "scene"];
 const SPACES = ["top", "centre", "bottom"];
 
-// The house style, one phrase per treatment. Tune these until 8 out of 10
-// results feel like the same painter.
-const BRUSH =
-  "expressive oil painting, thick impasto, visible bristle and palette knife marks, bold saturated colour, " +
-  "loose broken edges, naive expressionist, hand-painted, no text, no letters";
+// The house style. The medium leads the prompt (image models weigh the start
+// most) and closes it again, so the subject can't pull it towards digital art.
+// Tune until 8 out of 10 results feel like the same painter.
+const MEDIUM =
+  "An expressive oil painting on canvas, thick impasto brushstrokes, visible bristle marks and palette knife ridges";
+const FINISH =
+  "real oil paint texture, hand-painted by a naive expressionist painter, bold saturated colour, loose broken edges, " +
+  "traditional oil on canvas, not a photograph, not digital art, not 3D, no text, no letters";
 const STYLES = {
-  scene: `${BRUSH}, the whole canvas painted edge to edge, unfinished raw areas`,
+  scene: "painted edge to edge with unfinished raw areas",
   cutout: (ground) =>
-    `a single subject isolated on a plain flat pure ${ground} background, nothing else in the frame, ` +
-    `the subject large and filling the lower two thirds, empty ${ground} space above it, ${BRUSH}, raw brushy edges`,
+    `a single subject alone on a flat ${ground} painted background, nothing else in the frame, ` +
+    `the subject large and filling the lower two thirds, empty ${ground} space above it, raw brushy edges`,
 };
 
 const SPACE_HINT = {
@@ -65,6 +68,8 @@ Return ONLY valid JSON, no preamble, no markdown:
 Rules:
 - No text, letters, phones, screens or speech bubbles in the painting, and
   never mention a conversation, chat or message in image_prompt.
+- Describe only what is painted. Never name another medium or style (no
+  "photo", "realistic", "illustration", "cartoon", "3D", "digital").
 - Leave a calmer area at the negative_space position.
 - If the conversation is sexual, hateful, or romantic/sexual involving a
   minor, return {"refused": true}.`;
@@ -127,9 +132,11 @@ export function readScene(raw, mood, composition = "auto") {
 }
 
 export function imagePrompt(scene) {
-  const style = scene.treatment === "cutout" ? STYLES.cutout(scene.ground) : STYLES.scene;
-  const hint = scene.treatment === "cutout" ? "" : ` Composition: ${SPACE_HINT[scene.negative_space]}.`;
-  return `${scene.image_prompt}.${hint} ${style}`.slice(0, 2000);
+  const layout = scene.treatment === "cutout"
+    ? STYLES.cutout(scene.ground)
+    : `${STYLES.scene}, ${SPACE_HINT[scene.negative_space]}`;
+  const subject = scene.image_prompt.replace(/\.\s*$/, "");
+  return `${MEDIUM}: ${subject}. ${layout}. ${FINISH}.`.slice(0, 2000);
 }
 
 function normaliseScene(s, mood) {
@@ -147,6 +154,7 @@ function normaliseScene(s, mood) {
   // Belt and braces: strip anything that invites lettering.
   scene.image_prompt = scene.image_prompt
     .replace(/\b(text|letters?|words?|phones?|screens?|speech bubbles?|captions?|signs?)\b/gi, "")
+    .replace(/\b(photo(graph)?(ic|ically)?|photorealistic|hyper-?realistic|realistic|cinematic|render(ed)?|3d|cgi|digital( art)?|illustration|cartoon|anime|vector)\b/gi, "")
     .replace(/\s{2,}/g, " ");
   return scene;
 }
