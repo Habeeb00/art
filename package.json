@@ -4,9 +4,16 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test": "node tests/ideas.test.mjs && node tests/worker.test.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "preview": "node tests/serve.mjs"
   },
   "devDependencies": {
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.0.0",
+    "playwright": "^1.56.1",
+    "tesseract.js": "5.1.1",
+    "tesseract.js-core": "5.1.1",
+    "@tesseract.js-data/eng": "1.0.0"
   }
 }

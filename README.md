@@ -54,20 +54,18 @@ typed chat ───────────────────────
 
 ```sh
 npm install
-npx wrangler login      # free Cloudflare account
-npm run dev             # http://localhost:8787 (Workers AI runs remotely, uses your allowance)
-npm run deploy
+npm test                  # idea rules + worker, offline
+npm run preview           # http://localhost:8000/?preview — real paintings via Pollinations, no account
+npx wrangler login        # free Cloudflare account
+npm run deploy            # live, with Workers AI
 ```
 
-**No account yet?** Serve `public/` with any static server
-(`python3 -m http.server -d public`) and open:
+`?demo` paints random local paint (no AI, never matches the words), for working
+on layout offline. `npm run test:e2e` runs the real page and real OCR in a
+browser (once: `npx playwright install chromium`); pictures land in `tests/out/`.
 
-- `http://localhost:8000/?preview` for **real paintings**. The browser asks
-  Pollinations' free, keyless FLUX for the idea's subject, from the same idea
-  prompts as the worker. It's the quickest way to judge paintings without a
-  Cloudflare account.
-- `http://localhost:8000/?demo` for random local paint with no AI, for working
-  on bubbles and strokes offline. It never matches the words.
+Working on it with Claude Code? `CLAUDE.md` has the full context and decisions,
+and `docs/HISTORY.md` the story so far.
 
 ## Rate limit (optional)
 
