@@ -10,7 +10,8 @@ const SPACES = ["top", "centre", "bottom"];
 // most) and closes it again, so the subject can't pull it towards digital art.
 // Tune until 8 out of 10 results feel like the same painter.
 const MEDIUM =
-  "An expressive oil painting on canvas, thick impasto brushstrokes, visible bristle marks and palette knife ridges";
+  "A thick impasto oil painting on canvas: chunky directional brushstrokes, every stroke a separate dab of unblended paint, " +
+  "loose naive drawing, a limited palette";
 const FINISH =
   "real oil paint texture, hand-painted by a naive expressionist painter, bold saturated colour, loose broken edges, " +
   "traditional oil on canvas, not a photograph, not digital art, not 3D, no text, no letters";

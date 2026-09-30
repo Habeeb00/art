@@ -115,6 +115,7 @@
     autoComposition: "full", // set from the scene writer's choice when a painting arrives
     raw: null,              // the square painting as generated
     paintGround: [8, 8, 8], // flat background colour of a cut-out painting
+    paintedCutout: null,    // the cut-out subject, repainted, on transparent
     paintingId: 0,
     painting: null,     // HTMLCanvasElement, painting cropped to 1080×1350
     paintData: null,    // Uint8ClampedArray of the painting's pixels
@@ -475,6 +476,9 @@
     bubblePath(ctx, b.x, b.y, b.w, b.h, lay.radius, b.tail, lay.scale);
     ctx.fillStyle = me ? S.me : S.them;
     ctx.fill();
+    ctx.restore();
+    if (state.painting) paintBubble(b, lay, me ? S.me : S.them);
+    ctx.save();
 
     if (b.typing) {
       const cy = b.y + b.h / 2;
@@ -666,7 +670,7 @@
           add({
             x: edgeX + (rnd() - 0.5) * 30, y: b.y + rnd() * b.h,
             angle: Math.PI / 2 + (rnd() - 0.5) * 0.7, len: b.h * (0.6 + rnd() * 0.8),
-            width: 10 + rnd() * 22, over: true, dry: 0.3 + rnd() * 0.4, tool: "bristle",
+            width: 10 + rnd() * 22, over: true, dry: 0.3 + rnd() * 0.4, tool: "impasto",
           });
         }
         if (rnd() < 0.5) add(edgeStroke(b, rnd() * perim, rnd, a, false));
@@ -702,20 +706,18 @@
   }
 
   function makeStroke(rnd, palette, look, s) {
-    const tool = s.tool || weighted(rnd, look.hand.knife || look.hand.dab
-      ? { bristle: look.hand.bristle, knife: look.hand.knife, dab: look.hand.dab }
-      : { bristle: 1 });
+    const tool = s.tool || weighted(rnd, { impasto: look.hand.bristle, knife: look.hand.knife, dab: look.hand.dab });
     const c1 = palette[Math.floor(rnd() * palette.length)];
     const c2 = palette[Math.floor(rnd() * palette.length)];
     const stroke = {
       bend: 0.25,
       ...s,
-      type: tool === "dab" ? "bristle" : tool,
+      type: tool === "dab" ? "impasto" : tool,
       color: c1,
       color2: c2,
       dry: s.dry ?? 0.1 + rnd() * 0.5,
       seed: Math.floor(rnd() * 2 ** 31),
-      image: tool === "bristle" && strokeImages.length && rnd() < 0.3 ? strokeImages[Math.floor(rnd() * strokeImages.length)] : null,
+      image: tool === "impasto" && strokeImages.length && rnd() < 0.3 ? strokeImages[Math.floor(rnd() * strokeImages.length)] : null,
     };
     if (tool === "dab") {
       // Short, loaded, fat: impasto dabs.
@@ -894,6 +896,7 @@
 
   function paintStroke(c, s) {
     if (s.type === "knife") return drawKnife(c, s);
+    if (s.type === "impasto") return s.image ? drawImageStroke(c, s) : drawImpasto(c, s);
     if (s.type === "reveal") return drawReveal(c, s);
     return drawStroke(c, s);
   }
@@ -1142,25 +1145,60 @@
 
   // The square painting sits at the bottom of the frame with its flat
   // background keyed out, so only the subject remains.
-  let cutoutCache = { id: -1, canvas: null };
-  function cutoutLayer() {
-    if (cutoutCache.id === state.paintingId) return cutoutCache.canvas;
+  // Only ground that touches the edge of the image is removed (a flood fill
+  // from the border), so white faces or dark coats inside the subject stay.
+  function keyedCutout(img, ground) {
     const c = document.createElement("canvas");
     c.width = W;
     c.height = H;
     const g = c.getContext("2d");
-    g.drawImage(state.raw, 0, H - W, W, W);
-    const img = g.getImageData(0, 0, W, H);
-    const d = img.data;
-    const [gr, gg, gb] = state.paintGround;
-    for (let i = 0; i < d.length; i += 4) {
-      if (!d[i + 3]) continue;
-      const diff = Math.max(Math.abs(d[i] - gr), Math.abs(d[i + 1] - gg), Math.abs(d[i + 2] - gb));
-      d[i + 3] = clampN(((diff - 14) / 30) * 255, 0, 255);
+    g.drawImage(img, 0, H - W, W, W);
+    const data = g.getImageData(0, 0, W, H);
+    const d = data.data;
+    const [gr, gg, gb] = ground;
+    const diff = (i) => Math.max(Math.abs(d[i] - gr), Math.abs(d[i + 1] - gg), Math.abs(d[i + 2] - gb));
+
+    // Flood fill on a quarter-size grid for speed.
+    const q = 4;
+    const mw = Math.ceil(W / q);
+    const mh = Math.ceil(H / q);
+    const isGround = new Uint8Array(mw * mh);
+    const seen = new Uint8Array(mw * mh);
+    const stack = [];
+    const groundAt = (mx, my) => {
+      const x = Math.min(W - 1, mx * q + 1);
+      const y = Math.min(H - 1, my * q + 1);
+      const i = (y * W + x) * 4;
+      return !d[i + 3] || diff(i) < 24;
+    };
+    for (let mx = 0; mx < mw; mx++) { stack.push(mx, 0, mx, mh - 1); }
+    for (let my = 0; my < mh; my++) { stack.push(0, my, mw - 1, my); }
+    while (stack.length) {
+      const my = stack.pop();
+      const mx = stack.pop();
+      if (mx < 0 || my < 0 || mx >= mw || my >= mh) continue;
+      const k = my * mw + mx;
+      if (seen[k]) continue;
+      seen[k] = 1;
+      if (!groundAt(mx, my)) continue;
+      isGround[k] = 1;
+      stack.push(mx + 1, my, mx - 1, my, mx, my + 1, mx, my - 1);
     }
-    g.putImageData(img, 0, 0);
-    cutoutCache = { id: state.paintingId, canvas: c };
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        if (!d[i + 3]) continue;
+        if (!isGround[Math.floor(y / q) * mw + Math.floor(x / q)]) continue;
+        // Soft edge where ground meets subject.
+        d[i + 3] = clampN(((diff(i) - 14) / 30) * 255, 0, 255);
+      }
+    }
+    g.putImageData(data, 0, 0);
     return c;
+  }
+
+  function cutoutLayer() {
+    return state.paintedCutout;
   }
 
   // The subject steps in front of the bubbles, but never over the words.
@@ -1185,6 +1223,342 @@
     return 0.299 * bgLumData[i] + 0.587 * bgLumData[i + 1] + 0.114 * bgLumData[i + 2];
   }
 
+  // ── painterly repaint ──────────────────────────────────────────────────────
+  // The model decides what is painted; this decides how it looks. Every
+  // generated image is repainted by hand, stroke by stroke: thick impasto dabs
+  // that follow the forms, in a reduced palette, coarse to fine. The same brush
+  // paints the bubbles, so words and picture share one surface.
+  async function paintify(src, masked) {
+    const rnd = mulberry32(state.paintingId * 7919 + 17);
+    const q = 4;
+    const sw = Math.round(W / q);
+    const sh = Math.round(H / q);
+    const small = document.createElement("canvas");
+    small.width = sw;
+    small.height = sh;
+    const sg = small.getContext("2d");
+    sg.imageSmoothingQuality = "high";
+    sg.drawImage(src, 0, 0, sw, sh);
+    const sd = sg.getImageData(0, 0, sw, sh).data;
+    const full = src.getContext("2d").getImageData(0, 0, W, H).data;
+
+    // Flow field: smoothed structure tensor of the luminance gradient.
+    const n = sw * sh;
+    const lum = new Float32Array(n);
+    for (let i = 0; i < n; i++) lum[i] = 0.299 * sd[i * 4] + 0.587 * sd[i * 4 + 1] + 0.114 * sd[i * 4 + 2];
+    let exx = new Float32Array(n);
+    let eyy = new Float32Array(n);
+    let exy = new Float32Array(n);
+    for (let y = 1; y < sh - 1; y++) {
+      for (let x = 1; x < sw - 1; x++) {
+        const i = y * sw + x;
+        const gx = lum[i - sw + 1] + 2 * lum[i + 1] + lum[i + sw + 1] - lum[i - sw - 1] - 2 * lum[i - 1] - lum[i + sw - 1];
+        const gy = lum[i + sw - 1] + 2 * lum[i + sw] + lum[i + sw + 1] - lum[i - sw - 1] - 2 * lum[i - sw] - lum[i - sw + 1];
+        exx[i] = gx * gx;
+        eyy[i] = gy * gy;
+        exy[i] = gx * gy;
+      }
+    }
+    exx = boxBlur(exx, sw, sh, 3);
+    eyy = boxBlur(eyy, sw, sh, 3);
+    exy = boxBlur(exy, sw, sh, 3);
+    const energy = new Float32Array(n);
+    for (let i = 0; i < n; i++) energy[i] = Math.sqrt(exx[i] + eyy[i]);
+    const sorted = Array.from(energy.filter((_, i) => i % 7 === 0)).sort((a, b) => a - b);
+    const eMid = sorted[Math.floor(sorted.length * 0.55)] || 1;
+    const eHigh = sorted[Math.floor(sorted.length * 0.8)] || 1;
+
+    const palette = kmeansPalette(sd, 12, rnd);
+    const hand = rnd() * Math.PI; // stroke direction where the forms don't say otherwise
+
+    const out = document.createElement("canvas");
+    out.width = W;
+    out.height = H;
+    const g = out.getContext("2d");
+    // Underpainting: a soft, blurred version so no bare gaps show between strokes.
+    const tiny = document.createElement("canvas");
+    tiny.width = Math.round(W / 18);
+    tiny.height = Math.round(H / 18);
+    tiny.getContext("2d").drawImage(src, 0, 0, tiny.width, tiny.height);
+    g.imageSmoothingQuality = "high";
+    g.drawImage(tiny, 0, 0, W, H);
+    if (masked) {
+      g.globalCompositeOperation = "destination-in";
+      g.drawImage(src, 0, 0);
+      g.globalCompositeOperation = "source-over";
+    }
+
+    const layers = [
+      { r: 34, keep: () => true },
+      { r: 18, keep: (e) => e > eMid || rnd() < 0.35 },
+      { r: 9, keep: (e) => e > eHigh },
+    ];
+    let count = 0;
+    for (const layer of layers) {
+      const step = layer.r * 0.9;
+      const pts = [];
+      for (let y = step / 2; y < H; y += step) {
+        for (let x = step / 2; x < W; x += step) pts.push([x + (rnd() - 0.5) * step, y + (rnd() - 0.5) * step]);
+      }
+      shuffle(pts, rnd);
+      for (const [x, y] of pts) {
+        const sx = clampN(Math.floor(x / q), 0, sw - 1);
+        const sy = clampN(Math.floor(y / q), 0, sh - 1);
+        const i = sy * sw + sx;
+        if (masked && sd[i * 4 + 3] < 110) continue;
+        const e = energy[i];
+        if (!layer.keep(e)) continue;
+        let col;
+        if (layer.r > 10) col = [sd[i * 4], sd[i * 4 + 1], sd[i * 4 + 2]];
+        else {
+          const k = (clampN(Math.round(y), 0, H - 1) * W + clampN(Math.round(x), 0, W - 1)) * 4;
+          col = [full[k], full[k + 1], full[k + 2]];
+        }
+        // Pull towards the palette, then vary it: painters never lay one flat colour.
+        col = mix(col, nearest(palette, col), 0.5);
+        if (rnd() < 0.18) col = mix(col, secondNearest(palette, col), 0.6);
+        // Busy forms get lively colour; flat areas stay calm, like a flat ground.
+        const calm = e < eMid * 0.6;
+        col = saturate(shadeRgb(col, (rnd() - 0.5) * (calm ? 12 : 36)), 1.15);
+        const flow = 0.5 * Math.atan2(2 * exy[i], exx[i] - eyy[i]) + Math.PI / 2;
+        const angle = (e > eMid * 0.6 ? flow : hand + (rnd() - 0.5) * 0.8) + (rnd() - 0.5) * 0.35;
+        drawImpasto(g, {
+          x, y, angle, color: col,
+          len: layer.r * (1.2 + rnd() * rnd() * 3.6) * (calm ? 1.6 : 1),
+          width: layer.r * (0.9 + rnd() * 0.6),
+          seed: Math.floor(rnd() * 2 ** 31),
+          ridge: calm ? 0.5 : 1,
+        });
+        if (++count % 1500 === 0) await new Promise((r) => requestAnimationFrame(r));
+      }
+    }
+    return out;
+  }
+
+  // One thick stroke of oil paint: a loaded body, a few streaks where the
+  // bristles dragged other colours through it, and a ridge of light along one
+  // side and shadow along the other (light from the top left), like impasto.
+  function drawImpasto(c, s) {
+    const rnd = mulberry32(s.seed);
+    const L = s.len;
+    const hw = s.width / 2;
+    const bend = (rnd() - 0.5) * s.width * 0.9;
+    const alpha = s.alpha ?? 0.96;
+    const ridge = s.ridge ?? 1;
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    const N = 7;
+    const top = [];
+    const bot = [];
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      const x = -L / 2 + t * L;
+      const mid = bend * 4 * t * (1 - t);
+      // A flat brush: square-ish start, even body, a short dry taper at the end.
+      const w = hw * (t < 0.1 ? 0.9 : t > 0.8 ? Math.max(0.5, 1 - (t - 0.8) * 2.5) : 1) * (0.9 + rnd() * 0.14);
+      top.push([x, mid - w]);
+      bot.push([x, mid + w]);
+    }
+    const trace = (pts) => {
+      for (let i = 1; i < pts.length - 1; i++) {
+        c.quadraticCurveTo(pts[i][0], pts[i][1], (pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2);
+      }
+      c.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    };
+    c.beginPath();
+    c.moveTo(top[0][0], top[0][1]);
+    trace(top);
+    const back = bot.slice().reverse();
+    c.lineTo(back[0][0], back[0][1]);
+    trace(back);
+    c.closePath();
+    c.fillStyle = rgba(s.color, alpha);
+    c.fill();
+
+    // Bands of lighter and darker paint dragged along the stroke.
+    const streaks = 1 + Math.floor(rnd() * 2);
+    for (let k = 0; k < streaks; k++) {
+      const y = (rnd() - 0.5) * hw * 1.2;
+      const shade = (rnd() - 0.5) * 60;
+      c.strokeStyle = rgba([s.color[0] + shade, s.color[1] + shade, s.color[2] + shade], (0.25 + rnd() * 0.2) * alpha);
+      c.lineWidth = Math.max(1, hw * (0.2 + rnd() * 0.3));
+      const x0 = -L / 2 + rnd() * L * 0.25;
+      const x1 = L / 2 - rnd() * L * 0.35;
+      c.beginPath();
+      c.moveTo(x0, y + bend * 0.3);
+      c.quadraticCurveTo(0, y + bend, x1, y + bend * 0.2);
+      c.stroke();
+    }
+
+    if (ridge > 0) {
+      const litTop = Math.cos(s.angle) - Math.sin(s.angle) > 0;
+      const lw = Math.max(1.2, hw * 0.2);
+      // Light catches the ridge in broken runs; the shadow side is only a hint.
+      const edge = (pts, inset, style) => {
+        c.strokeStyle = style;
+        c.lineWidth = lw;
+        c.beginPath();
+        let pen = false;
+        for (let i = 0; i < pts.length - 1; i++) {
+          if (rnd() < 0.3) { pen = false; continue; }
+          if (pen) c.lineTo(pts[i][0], pts[i][1] + inset);
+          else { c.moveTo(pts[i][0], pts[i][1] + inset); pen = true; }
+        }
+        c.stroke();
+      };
+      const light = `rgba(255,255,255,${0.42 * ridge})`;
+      const dark = `rgba(0,0,0,${0.12 * ridge})`;
+      edge(top, lw * 0.8, litTop ? light : dark);
+      edge(bot, -lw * 0.8, litTop ? dark : light);
+    }
+    c.restore();
+  }
+
+  function boxBlur(a, w, h, r) {
+    const tmp = new Float32Array(a.length);
+    const out = new Float32Array(a.length);
+    for (let y = 0; y < h; y++) {
+      let acc = 0;
+      for (let x = -r; x <= r; x++) acc += a[y * w + clampN(x, 0, w - 1)];
+      for (let x = 0; x < w; x++) {
+        tmp[y * w + x] = acc / (2 * r + 1);
+        acc += a[y * w + Math.min(w - 1, x + r + 1)] - a[y * w + Math.max(0, x - r)];
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let y = -r; y <= r; y++) acc += tmp[clampN(y, 0, h - 1) * w + x];
+      for (let y = 0; y < h; y++) {
+        out[y * w + x] = acc / (2 * r + 1);
+        acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x];
+      }
+    }
+    return out;
+  }
+
+  // A reduced palette pulls neighbouring strokes to the same few paints, so
+  // colours sit side by side unblended instead of in smooth gradients.
+  function kmeansPalette(d, k, rnd) {
+    const px = [];
+    for (let t = 0; t < 1800; t++) {
+      const i = Math.floor(rnd() * (d.length / 4)) * 4;
+      if (d[i + 3] > 128) px.push([d[i], d[i + 1], d[i + 2]]);
+    }
+    if (!px.length) return [[128, 128, 128]];
+    let centres = Array.from({ length: k }, () => px[Math.floor(rnd() * px.length)].slice());
+    for (let it = 0; it < 8; it++) {
+      const sums = centres.map(() => [0, 0, 0, 0]);
+      for (const p of px) {
+        const j = nearestIndex(centres, p);
+        sums[j][0] += p[0]; sums[j][1] += p[1]; sums[j][2] += p[2]; sums[j][3]++;
+      }
+      centres = sums.map((s2, j) => (s2[3] ? [s2[0] / s2[3], s2[1] / s2[3], s2[2] / s2[3]] : centres[j]));
+    }
+    return centres;
+  }
+  function nearestIndex(list, p) {
+    let best = 0;
+    let bd = Infinity;
+    list.forEach((c, j) => {
+      const d = (c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2;
+      if (d < bd) { bd = d; best = j; }
+    });
+    return best;
+  }
+  function nearest(list, p) { return list[nearestIndex(list, p)]; }
+  function secondNearest(list, p) {
+    const first = nearestIndex(list, p);
+    const rest = list.filter((_, j) => j !== first);
+    return rest.length ? rest[nearestIndex(rest, p)] : list[first];
+  }
+  function shuffle(a, rnd) {
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+  }
+
+  // The bubble in paint: a brushed fill in its own colour and a brushy outline
+  // along the straight stretches (corners stay round), then crisp words on top.
+  function paintBubble(b, lay, fillHex) {
+    const col = hexRgb(fillHex);
+    const rnd = mulberry32((state.strokeSeed ^ Math.imul(b.index + 1, 2654435761)) >>> 0);
+    ctx.save();
+    bubblePath(ctx, b.x, b.y, b.w, b.h, lay.radius, b.tail, lay.scale);
+    ctx.clip();
+    const n = Math.round((b.w * b.h) / 1600);
+    for (let k = 0; k < n; k++) {
+      drawImpasto(ctx, {
+        x: b.x + rnd() * b.w, y: b.y + rnd() * b.h,
+        angle: (rnd() - 0.5) * 0.25, len: 50 + rnd() * 110, width: 12 + rnd() * 18,
+        color: shadeRgb(col, (rnd() - 0.5) * 16), alpha: 0.55, ridge: 0.45,
+        seed: Math.floor(rnd() * 2 ** 31),
+      });
+    }
+    ctx.restore();
+    const r = Math.min(lay.radius, b.h / 2, b.w / 2);
+    const edges = [
+      [b.x + r, b.y, b.x + b.w - r, b.y],
+      [b.x + r, b.y + b.h, b.x + b.w - r, b.y + b.h],
+      [b.x, b.y + r, b.x, b.y + b.h - r],
+      [b.x + b.w, b.y + r, b.x + b.w, b.y + b.h - r],
+    ];
+    for (const [x0, y0, x1, y1] of edges) {
+      const len = Math.hypot(x1 - x0, y1 - y0);
+      if (len < 10) continue;
+      const tx = (x1 - x0) / len;
+      const ty = (y1 - y0) / len;
+      const cx = b.x + b.w / 2;
+      const cy = b.y + b.h / 2;
+      const mx = (x0 + x1) / 2 - cx;
+      const my = (y0 + y1) / 2 - cy;
+      const nl = Math.hypot(mx, my) || 1;
+      const nx = Math.abs(tx) > 0.5 ? 0 : Math.sign(mx);
+      const ny = Math.abs(tx) > 0.5 ? Math.sign(my) : 0;
+      for (let d = rnd() * 10; d < len; d += 20 + rnd() * 16) {
+        const seg = Math.min(26 + rnd() * 34, (len - d) * 2 + 10);
+        const out = -1 + rnd() * 5;
+        drawImpasto(ctx, {
+          x: x0 + tx * d + nx * out, y: y0 + ty * d + ny * out,
+          angle: Math.atan2(ty, tx) + (rnd() - 0.5) * 0.12, len: seg, width: 8 + rnd() * 8,
+          color: shadeRgb(col, (rnd() - 0.5) * 12), alpha: 0.96, ridge: 0.4,
+          seed: Math.floor(rnd() * 2 ** 31),
+        });
+      }
+      void nl;
+    }
+  }
+
+  function hexRgb(hex) {
+    const v = parseInt(hex.slice(1), 16);
+    return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+  }
+  function shadeRgb(c, d) { return [c[0] + d, c[1] + d, c[2] + d]; }
+
+  // A canvas weave over everything, bubbles included: one surface.
+  let weaveCanvas = null;
+  function weave() {
+    if (weaveCanvas) return weaveCanvas;
+    weaveCanvas = document.createElement("canvas");
+    weaveCanvas.width = weaveCanvas.height = 96;
+    const g = weaveCanvas.getContext("2d");
+    const img = g.createImageData(96, 96);
+    const rnd = mulberry32(23);
+    for (let y = 0; y < 96; y++) {
+      for (let x = 0; x < 96; x++) {
+        const threadX = Math.sin((x / 96) * Math.PI * 2 * 24) * 0.5 + 0.5;
+        const threadY = Math.sin((y / 96) * Math.PI * 2 * 24) * 0.5 + 0.5;
+        const v = 128 + ((x + y) % 2 ? threadX : threadY) * 40 - 20 + (rnd() - 0.5) * 30;
+        const i = (y * 96 + x) * 4;
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+        img.data[i + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return weaveCanvas;
+  }
+
   // ── render ─────────────────────────────────────────────────────────────────
   let frame = 0;
   function scheduleRender() {
@@ -1206,10 +1580,14 @@
     if (state.painting && look.occlude) drawOccluder(lay);
     for (const s of strokes) if (s.over) paintStroke(ctx, s);
     if (state.painting) {
-      // A whisper of canvas grain over everything, so the bubbles sit in the paint.
+      // Canvas weave and grain over everything, bubbles included, so the whole
+      // piece reads as one painted surface rather than a picture with stickers.
       ctx.save();
-      ctx.globalAlpha = 0.5;
       ctx.globalCompositeOperation = "overlay";
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = ctx.createPattern(weave(), "repeat");
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 0.5;
       ctx.drawImage(grain(), 0, 0, W, H);
       ctx.restore();
     }
@@ -1329,11 +1707,18 @@
     const dw = img.naturalWidth * s;
     const dh = img.naturalHeight * s;
     g.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
-    state.painting = c;
-    state.raw = img;
-    state.paintGround = borderColour(img);
+    const ground = borderColour(img);
     state.paintingId++;
-    state.paintData = g.getImageData(0, 0, W, H).data;
+    clearInterval(waitTimer);
+    els.overlayText.textContent = "Laying on the paint…";
+    await new Promise((r) => requestAnimationFrame(r));
+    const painted = await paintify(c, false);
+    const cutout = await paintify(keyedCutout(img, ground), true);
+    state.raw = img;
+    state.paintGround = ground;
+    state.painting = painted;
+    state.paintedCutout = cutout;
+    state.paintData = painted.getContext("2d").getImageData(0, 0, W, H).data;
   }
 
   // Median colour around the painting's edge: the flat ground of a cut-out.

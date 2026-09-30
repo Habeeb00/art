@@ -84,6 +84,17 @@ of the line. It's all oil brushwork: bristle, palette knife and impasto dabs. **
 a bubble runs off the edge and whether the subject steps in front. It's
 instant and free.
 
+## Painted by hand, not by the model
+
+The image model only decides *what* is painted. Every generated image is then
+repainted in the browser, stroke by stroke (`paintify` in `public/app.js`):
+thousands of thick impasto dabs that follow the forms, coarse to fine, pulled
+to a reduced palette, each with a light-catching ridge. Flat areas stay calm;
+cut-out subjects keep raw, brushy edges. The same brush paints the bubbles (a
+brushed fill and a brushy outline, with crisp words on top), and one canvas
+weave covers everything, so words and picture read as one painted surface.
+It takes a second or two on a laptop, a few on a phone.
+
 ## Scenes that read
 
 The scene writer finds the phrase or feeling at the heart of the conversation
