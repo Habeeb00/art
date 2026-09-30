@@ -1277,17 +1277,27 @@
   // for the painting. No key; slower and less predictable than Workers AI.
   async function previewPainting(messages) {
     const { sceneMessages, readScene, imagePrompt } = await import("./scene.js");
+    const chat = sceneMessages(messages, state.mood);
     let raw;
     try {
       const res = await fetch("https://text.pollinations.ai/openai", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: "openai", messages: sceneMessages(messages, state.mood), seed: randSeed() }),
+        body: JSON.stringify({ model: "openai", messages: chat, seed: randSeed() }),
       });
       if (!res.ok) throw new Error(String(res.status));
       raw = (await res.json())?.choices?.[0]?.message?.content ?? "";
     } catch {
-      throw new Error("Couldn't reach the preview scene writer. Try again in a moment.");
+      // Fall back to the plain GET endpoint (system prompt + last turn only).
+      try {
+        const system = `${chat[0].content}\n\nExample reply:\n${chat[2].content}`;
+        const res = await fetch(`https://text.pollinations.ai/${encodeURIComponent(chat[3].content)}` +
+          `?model=openai&json=true&seed=${randSeed()}&system=${encodeURIComponent(system)}`);
+        if (!res.ok) throw new Error(String(res.status));
+        raw = await res.text();
+      } catch {
+        throw new Error("Couldn't reach the preview scene writer. Try again in a moment.");
+      }
     }
     const scene = readScene(raw, state.mood, state.composition);
     if (scene.refused) throw new Error("We can't paint this one. Try a different conversation.");
