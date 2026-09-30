@@ -17,7 +17,12 @@
   const META_SIZE = 24;
   const MAX_MESSAGES = 20;
   const MAX_CHARS = 300;
-  const DEMO = new URLSearchParams(location.search).has("demo");
+  const PARAMS = new URLSearchParams(location.search);
+  const DEMO = PARAMS.has("demo");
+  // ?preview paints with Pollinations' free, keyless models straight from the
+  // browser, using the same scene prompt as the worker. For trying real
+  // paintings before a Cloudflare account exists.
+  const PREVIEW = PARAMS.has("preview");
 
   // Each chat style has a dark and a light theme; the theme follows whatever is
   // behind the bubbles, like a phone in dark or light mode.
@@ -567,24 +572,21 @@
 
   // ── look: composition + the painter's hand ─────────────────────────────────
   // The composition comes with the painting (the scene writer picks a cut-out,
-  // a scene or a paper doodle); each Remix re-rolls the hand: its mix of tools,
+  // or a scene); each Remix re-rolls the hand: its mix of oil tools,
   // whether a bubble runs off the edge, whether the subject steps in front.
   function pickLook() {
     const rnd = mulberry32(state.strokeSeed ^ 0x5bd1e995);
     const composition = state.composition === "auto" ? state.autoComposition : state.composition;
-    const paper = composition === "paper";
     return {
       composition,
       ground: composition === "cutout" ? state.paintGround
-        : paper ? [250, 248, 243]
         : rnd() < 0.6 ? [8, 8, 8] : [246, 244, 239],
       bleed: rnd() < 0.25 ? 20 + rnd() * 60 : 0,
       occlude: composition === "cutout" && rnd() < 0.8,
       hand: {
         bristle: 0.25 + rnd() * 0.75,
-        knife: paper ? rnd() * 0.3 : rnd() * 0.8,
+        knife: rnd() * 0.8,
         dab: rnd() * 0.7,
-        scribble: paper ? 0.6 + rnd() * 0.4 : rnd() < 0.5 ? 0.2 + rnd() * 0.6 : 0,
       },
     };
   }
@@ -593,7 +595,7 @@
   // Strokes are generated from the seed and the layout, so typing keeps them
   // steady and Remix (a new seed) reshuffles them instantly. Every bubble gets
   // its own treatment: left clean, worked along one stretch of edge, a cluster
-  // at a corner, a halo underneath, scribbled on, or partly swallowed by paint.
+  // at a corner, a halo underneath, or partly swallowed by paint.
   function generateStrokes(lay, look) {
     const a = state.amount / 100;
     const strokes = [];
@@ -607,16 +609,14 @@
       const rnd = mulberry32(state.strokeSeed + j * 7919);
       const palette = samplePalette(b, rnd);
       // Most bubbles stay clean: the painting meets the words through the
-      // composition. Paint on a bubble is the exception, and a paper doodle is
-      // the one place it gets busy.
+      // composition. Paint on a bubble is the exception.
       const comp = look.composition;
       const treatment = b.typing ? "clean" : weighted(rnd, {
-        clean: (comp === "cutout" ? 1.8 : comp === "paper" ? 0.35 : 0.95) - 0.55 * a,
+        clean: (comp === "cutout" ? 1.8 : 0.95) - 0.55 * a,
         edge: 0.3,
         corner: 0.15,
         halo: 0.08,
         swallow: b.w > 220 && swallowed < maxSwallow && comp !== "cutout" ? 0.02 + 0.4 * a * a : 0,
-        scribble: look.hand.scribble * (comp === "paper" ? 1 : 0.25),
       });
       const add = (s) => strokes.push(makeStroke(rnd, palette, look, s));
       const perim = 2 * (b.w + b.h);
@@ -672,22 +672,6 @@
         if (rnd() < 0.5) add(edgeStroke(b, rnd() * perim, rnd, a, false));
       }
 
-      if (treatment === "scribble" || (look.hand.scribble && rnd() < look.hand.scribble * 0.25)) {
-        const n = 1 + Math.round(rnd() * 2);
-        for (let k = 0; k < n; k++) {
-          const e = edgePoint(b, rnd() * perim);
-          const out = -10 + rnd() * 50;
-          add({
-            tool: "scribble",
-            x: e.x + e.nx * out, y: e.y + e.ny * out,
-            angle: Math.atan2(e.ty, e.tx) + (rnd() - 0.5) * 0.8,
-            size: 70 + rnd() * 170, width: 4 + rnd() * 7,
-            kind: weighted(rnd, { zigzag: 1, loop: 0.8, wave: 0.7 }),
-            over: rnd() < 0.35 + 0.3 * a,
-          });
-        }
-      }
-
       // At high paint amounts a stroke occasionally crosses a word.
       if (a > 0.6 && rnd() < (a - 0.6) * 1.2 && b.lines.length && treatment !== "clean") {
         const line = Math.floor(rnd() * b.lines.length);
@@ -700,22 +684,6 @@
       }
     });
 
-    // Paper doodles: black ink pen lines scribbled over paint and paper alike.
-    if (look.composition === "paper") {
-      const rnd = mulberry32(state.strokeSeed ^ 0x1b873593);
-      const palette = [[40, 40, 40]];
-      const n = 4 + Math.round(rnd() * 5 + a * 6);
-      for (let k = 0; k < n; k++) {
-        const b = bubbles.length && rnd() < 0.35 ? bubbles[Math.floor(rnd() * bubbles.length)] : null;
-        const e = b ? edgePoint(b, rnd() * 2 * (b.w + b.h)) : null;
-        strokes.push(makeStroke(rnd, palette, look, {
-          tool: "scribble", ink: true,
-          x: e ? e.x + e.nx * 20 : rnd() * W, y: e ? e.y + e.ny * 20 : H * (0.3 + rnd() * 0.7),
-          angle: (rnd() - 0.5) * 2, size: 60 + rnd() * 160, width: 2 + rnd() * 2,
-          kind: weighted(rnd, { zigzag: 1.2, loop: 0.8, wave: 0.6 }), over: true,
-        }));
-      }
-    }
     return strokes;
   }
 
@@ -743,7 +711,7 @@
       bend: 0.25,
       ...s,
       type: tool === "dab" ? "bristle" : tool,
-      color: s.ink ? [26, 24, 22] : tool === "scribble" ? saturate(c1, 1.5) : c1,
+      color: c1,
       color2: c2,
       dry: s.dry ?? 0.1 + rnd() * 0.5,
       seed: Math.floor(rnd() * 2 ** 31),
@@ -926,7 +894,6 @@
 
   function paintStroke(c, s) {
     if (s.type === "knife") return drawKnife(c, s);
-    if (s.type === "scribble") return drawScribble(c, s);
     if (s.type === "reveal") return drawReveal(c, s);
     return drawStroke(c, s);
   }
@@ -1009,62 +976,6 @@
     c.restore();
   }
 
-  // Oil-pastel scribble: a waxy line (zigzag, loop or wave) broken up by the canvas grain.
-  const scribbleCanvas = document.createElement("canvas");
-  function drawScribble(c, s) {
-    const rnd = mulberry32(s.seed);
-    const size = s.size;
-    const pts = [];
-    if (s.kind === "zigzag") {
-      const n = 5 + Math.floor(rnd() * 8);
-      for (let i = 0; i <= n; i++) {
-        pts.push([-size / 2 + (i / n) * size + (rnd() - 0.5) * 12, (i % 2 ? -1 : 1) * size * (0.15 + rnd() * 0.2)]);
-      }
-    } else if (s.kind === "loop") {
-      const turns = 2 + rnd() * 3;
-      const r = size * (0.12 + rnd() * 0.1);
-      for (let t = 0; t <= turns * Math.PI * 2; t += 0.35) {
-        pts.push([-size / 2 + (t / (turns * Math.PI * 2)) * size + Math.cos(t) * r, Math.sin(t) * r * (0.6 + rnd() * 0.3)]);
-      }
-    } else {
-      const k = 1 + rnd() * 2.5;
-      for (let x = -size / 2; x <= size / 2; x += 10) {
-        pts.push([x, Math.sin((x / size) * Math.PI * 2 * k) * size * 0.14 + (rnd() - 0.5) * 4]);
-      }
-    }
-
-    const dim = Math.ceil(size * 1.1 + s.width * 4);
-    scribbleCanvas.width = dim;
-    scribbleCanvas.height = dim;
-    const g = scribbleCanvas.getContext("2d");
-    g.translate(dim / 2, dim / 2);
-    g.lineCap = "round";
-    g.lineJoin = "round";
-    g.strokeStyle = rgba(s.color, 0.95);
-    g.lineWidth = s.width;
-    g.beginPath();
-    g.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length - 1; i++) {
-      const mx = (pts[i][0] + pts[i + 1][0]) / 2;
-      const my = (pts[i][1] + pts[i + 1][1]) / 2;
-      g.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
-    }
-    g.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
-    g.stroke();
-    // Wax skipping over the weave.
-    g.setTransform(1, 0, 0, 1, 0, 0);
-    g.globalCompositeOperation = "destination-out";
-    g.fillStyle = g.createPattern(speckle(), "repeat");
-    g.translate(-rnd() * 256, -rnd() * 256);
-    g.fillRect(0, 0, dim + 256, dim + 256);
-
-    c.save();
-    c.translate(s.x, s.y);
-    c.rotate(s.angle);
-    c.drawImage(scribbleCanvas, -dim / 2, -dim / 2);
-    c.restore();
-  }
-
   // The painting grows over one end of a bubble: the painting itself is drawn
   // back on top through a ragged brush-shaped mask, hiding part of the words.
   const revealCanvas = document.createElement("canvas");
@@ -1112,7 +1023,6 @@
   // full:   the painting fills the frame, bubbles laid simply on top.
   // torn:   bare ground where the words sit, painting beyond a torn, brushy edge.
   // cutout: the subject alone on flat black or white; it can step in front of bubbles.
-  // paper:  a doodle on white paper, bare paper left around the words.
   function buildMask(look, lay) {
     const m = document.createElement("canvas");
     m.width = W;
@@ -1122,26 +1032,6 @@
     g.fillStyle = "#fff";
     const blockTop = lay.top;
     const blockBottom = lay.top + lay.height;
-
-    if (look.composition === "paper") {
-      // Paint everywhere, then scrub bare paper back around the words.
-      const bubbles = lay.items.filter((it) => it.type === "bubble");
-      const minX = Math.min(...bubbles.map((b) => b.x), W / 2);
-      const maxX = Math.max(...bubbles.map((b) => b.x + b.w), W / 2);
-      const x0 = minX < 120 ? -60 : minX - 50;
-      const x1 = maxX > W - 120 ? W + 60 : maxX + 50;
-      const y0 = blockTop - 40 - rnd() * 40;
-      const y1 = blockBottom + 20 + rnd() * 40;
-      g.fillRect(0, 0, W, H);
-      g.globalCompositeOperation = "destination-out";
-      g.fillRect(x0 + 60, y0 + 60, x1 - x0 - 120, y1 - y0 - 120);
-      raggedEdge(g, x0, y0, x1, y0, 0, 1, rnd, 200);
-      raggedEdge(g, x1, y0, x1, y1, -1, 0, rnd, 200);
-      raggedEdge(g, x1, y1, x0, y1, 0, -1, rnd, 200);
-      raggedEdge(g, x0, y1, x0, y0, 1, 0, rnd, 200);
-      g.globalCompositeOperation = "source-over";
-      return m;
-    }
 
     // torn
     if (lay.space === "top") {
@@ -1295,21 +1185,6 @@
     return 0.299 * bgLumData[i] + 0.587 * bgLumData[i + 1] + 0.114 * bgLumData[i + 2];
   }
 
-  let speckleCanvas = null;
-  function speckle() {
-    if (speckleCanvas) return speckleCanvas;
-    speckleCanvas = document.createElement("canvas");
-    speckleCanvas.width = speckleCanvas.height = 256;
-    const g = speckleCanvas.getContext("2d");
-    const img = g.createImageData(256, 256);
-    const rnd = mulberry32(11);
-    for (let i = 0; i < img.data.length; i += 4) {
-      img.data[i + 3] = rnd() < 0.3 ? 120 + rnd() * 135 : 0;
-    }
-    g.putImageData(img, 0, 0);
-    return speckleCanvas;
-  }
-
   // ── render ─────────────────────────────────────────────────────────────────
   let frame = 0;
   function scheduleRender() {
@@ -1362,14 +1237,15 @@
   async function paintIt() {
     if (state.busy) return;
     const messages = state.messages
-      .filter((m) => m.kind === "deleted" || m.text.trim())
+      .filter((m) => m.kind !== "text" || m.text.trim())
       .map((m) => ({ side: m.side, text: m.text.trim(), kind: m.kind }));
-    if (!messages.length) return setStatus("Write at least one message first.", true);
+    if (!messages.some((m) => m.kind !== "typing")) return setStatus("Write at least one message first.", true);
 
     setBusy(true);
     try {
       let data;
       if (DEMO) data = await demoPainting(state.composition);
+      else if (PREVIEW) data = await previewPainting(messages);
       else {
         let res;
         try {
@@ -1397,9 +1273,32 @@
     }
   }
 
+  // Pollinations: an OpenAI-compatible text endpoint for the scene, and FLUX
+  // for the painting. No key; slower and less predictable than Workers AI.
+  async function previewPainting(messages) {
+    const { sceneMessages, readScene, imagePrompt } = await import("./scene.js");
+    let raw;
+    try {
+      const res = await fetch("https://text.pollinations.ai/openai", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "openai", messages: sceneMessages(messages, state.mood), seed: randSeed() }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      raw = (await res.json())?.choices?.[0]?.message?.content ?? "";
+    } catch {
+      throw new Error("Couldn't reach the preview scene writer. Try again in a moment.");
+    }
+    const scene = readScene(raw, state.mood, state.composition);
+    if (scene.refused) throw new Error("We can't paint this one. Try a different conversation.");
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt(scene))}` +
+      `?width=1024&height=1024&model=flux&nologo=true&seed=${randSeed()}`;
+    console.info("Unsaid preview scene", scene);
+    return { image: url, scene };
+  }
+
   function compositionFor(treatment) {
     if (treatment === "cutout") return "cutout";
-    if (treatment === "doodle") return "paper";
     return Math.random() < 0.6 ? "full" : "torn";
   }
 
@@ -1443,6 +1342,7 @@
   function loadImage(src) {
     return new Promise((resolve, reject) => {
       const img = new Image();
+      img.crossOrigin = "anonymous"; // keeps the canvas exportable for preview images
       img.onload = () => resolve(img);
       img.onerror = () => reject(new Error("The painting didn't load. Try again."));
       img.src = src;
@@ -1503,8 +1403,7 @@
     const rnd = mulberry32(randSeed());
     const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
     const treatment = composition === "cutout" ? "cutout"
-      : composition === "paper" ? "doodle"
-      : composition === "auto" ? pick(["cutout", "scene", "doodle"]) : "scene";
+      : composition === "auto" ? pick(["cutout", "scene"]) : "scene";
     const stroke = (x, y, angle, len, width, colors, dry = 0.1 + rnd() * 0.4) => drawStroke(g, {
       x, y, angle, len, width, color: pick(colors), color2: pick(colors), dry, seed: Math.floor(rnd() * 2 ** 31),
     });
@@ -1528,16 +1427,11 @@
       ];
       const p = pick(palettes);
       const horizon = size * (0.35 + rnd() * 0.2);
-      if (treatment === "doodle") {
-        g.fillStyle = "#faf8f3";
-        g.fillRect(0, 0, size, size);
-      } else {
-        g.fillStyle = rgba(p.sky[0], 1);
-        g.fillRect(0, 0, size, horizon);
-        g.fillStyle = rgba(p.ground[0], 1);
-        g.fillRect(0, horizon, size, size - horizon);
-      }
-      const n = treatment === "doodle" ? 180 : 520;
+      g.fillStyle = rgba(p.sky[0], 1);
+      g.fillRect(0, 0, size, horizon);
+      g.fillStyle = rgba(p.ground[0], 1);
+      g.fillRect(0, horizon, size, size - horizon);
+      const n = 520;
       for (let i = 0; i < n; i++) {
         const sky = i < n * 0.42;
         const y = sky ? rnd() * horizon : horizon + rnd() * (size - horizon);
@@ -1621,6 +1515,7 @@
   renderList();
   render();
   if (DEMO) setStatus("Demo mode: random local paint, not AI, so it won't match your words.");
+  if (PREVIEW) setStatus("Preview mode: real paintings from Pollinations' free models, painted from your browser.");
   loadStrokeImages();
   // Canvas text needs the web fonts (Malayalam especially) before it looks right.
   Promise.all([
