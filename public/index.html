@@ -158,6 +158,21 @@
     }
     .toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; padding-top: 22px; }
     .toggle input { accent-color: var(--accent); width: 18px; height: 18px; }
+    .upload { margin-bottom: 14px; }
+    .upload-btn {
+      display: block;
+      text-align: center;
+      border: 1px dashed var(--accent);
+      color: var(--accent);
+      border-radius: 12px;
+      padding: 14px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .upload-btn:hover { background: rgba(232, 178, 58, 0.08); }
+    .upload-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+    .toggle.small { padding-top: 0; font-size: 13px; color: var(--muted); }
+    .upload .note { margin-top: 6px; }
     .examples { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
     .examples span { font-size: 12px; color: var(--muted); margin-right: 2px; }
     .chip {
@@ -262,12 +277,21 @@
 <body>
   <header>
     <h1>Unsaid <span>.</span></h1>
-    <p class="tagline">Type a message you never sent. We'll paint it. The chat records what was said; the painting holds everything that wasn't.</p>
+    <p class="tagline">Upload a chat, or type one. We'll paint what it meant. The chat records what was said; the painting holds everything that wasn't.</p>
   </header>
 
   <main>
     <section class="panel composer" aria-label="Conversation">
       <h2>The conversation</h2>
+      <div class="upload">
+        <label class="upload-btn" for="shot">Upload a chat screenshot</label>
+        <input id="shot" type="file" accept="image/*" hidden>
+        <div class="upload-row">
+          <label class="toggle small"><input id="mal" type="checkbox"> Malayalam in the chat</label>
+          <button id="clear-shot" type="button" class="chip" hidden>Remove screenshot</button>
+        </div>
+        <p class="note">The text is read on your device. Check it below, or just type the chat instead.</p>
+      </div>
       <div id="messages"></div>
       <button class="add" id="add" type="button">+ Add message</button>
 

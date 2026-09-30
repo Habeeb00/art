@@ -120,6 +120,7 @@
     paintingId: 0,
     painting: null,     // HTMLCanvasElement, painting cropped to 1080×1350
     paintData: null,    // Uint8ClampedArray of the painting's pixels
+    shot: null,             // an uploaded screenshot, analysed (see readScreenshot)
     reading: null,          // { idea, matched, detail } for the current painting
     strokeSeed: randSeed(),
     busy: false,
@@ -132,7 +133,7 @@
   const ctx = canvas.getContext("2d");
   const els = {
     list: $("messages"), add: $("add"), examples: $("examples"),
-    style: $("style"), composition: $("composition"), idea: $("idea"), time: $("time"), meta: $("meta"),
+    style: $("style"), composition: $("composition"), idea: $("idea"), shot: $("shot"), mal: $("mal"), clearShot: $("clear-shot"), time: $("time"), meta: $("meta"),
     paint: $("paint"), overlay: $("overlay"), overlayText: $("overlay-text"),
     status: $("status"), amount: $("amount"),
     repaint: $("repaint"), again: $("again"), download: $("download"),
@@ -1766,6 +1767,339 @@
     return weaveCanvas;
   }
 
+  // ── screenshots ────────────────────────────────────────────────────────────
+  // Upload a chat screenshot: the text is read on the device (Tesseract OCR),
+  // lines are grouped into messages (right side = me, left = them), each
+  // bubble's shape is found by growing out from its text in the bubble's own
+  // colour, and the painting is laid behind, beside or through the bubbles,
+  // never over the words.
+  const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement("script");
+      el.src = src;
+      el.onload = resolve;
+      el.onerror = () => reject(new Error("Couldn't load the text reader. Check your connection."));
+      document.head.append(el);
+    });
+  }
+
+  async function readScreenshot(file) {
+    if (state.busy) return;
+    setBusy(true, "Reading the chat…");
+    try {
+      const url = URL.createObjectURL(file);
+      const img = await loadImage(url);
+      if (!window.Tesseract) await loadScript(TESSERACT_URL);
+      // Read at up to 1400px wide: plenty for chat text, quicker on phones.
+      const k = Math.min(1, 1400 / img.naturalWidth);
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.naturalWidth * k);
+      c.height = Math.round(img.naturalHeight * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      const worker = await window.Tesseract.createWorker(els.mal.checked ? "eng+mal" : "eng", 1);
+      const { data } = await worker.recognize(textOnly(c));
+      await worker.terminate();
+      const bubbles = parseShot(data.lines || [], c.width, c.height);
+      if (!bubbles.length) throw new Error("Couldn't find any messages in that screenshot. Try a clearer one, or type the chat below.");
+      state.messages = bubbles.map((b) => ({ side: b.side, text: b.text, kind: "text" }));
+      renderList();
+      state.shot = analyseShot(c, bubbles);
+      state.shotId = (state.shotId || 0) + 1;
+      els.clearShot.hidden = false;
+      render();
+      setStatus(`Read ${bubbles.length} message${bubbles.length > 1 ? "s" : ""}. Check them below (they decide the idea), then tap Paint it.`);
+    } catch (err) {
+      setStatus(err.message || "Couldn't read that screenshot.", true);
+    } finally {
+      setBusy(false);
+      els.shot.value = "";
+    }
+  }
+
+  // Chats mix light-on-dark and dark-on-light text (white on a blue bubble,
+  // black on grey, anything in dark mode). OCR wants dark text on white, so
+  // each pixel becomes "how much it stands out from its surroundings": text of
+  // any colour turns dark, flat bubbles and backgrounds turn white.
+  function textOnly(src) {
+    const w = src.width;
+    const h = src.height;
+    const lumOf = (d) => {
+      const out = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) out[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+      return out;
+    };
+    const lum = lumOf(src.getContext("2d").getImageData(0, 0, w, h).data);
+    // Local background: a heavily blurred copy (downscale, then upscale smoothly).
+    const small = document.createElement("canvas");
+    small.width = Math.max(1, Math.round(w / 24));
+    small.height = Math.max(1, Math.round(h / 24));
+    small.getContext("2d").drawImage(src, 0, 0, small.width, small.height);
+    const up = document.createElement("canvas");
+    up.width = w;
+    up.height = h;
+    const ug = up.getContext("2d");
+    ug.imageSmoothingQuality = "high";
+    ug.drawImage(small, 0, 0, w, h);
+    const bg = lumOf(ug.getImageData(0, 0, w, h).data);
+    const out = ug.createImageData(w, h);
+    for (let i = 0; i < w * h; i++) {
+      const v = 255 - Math.min(255, Math.abs(lum[i] - bg[i]) * 3.2);
+      out.data[i * 4] = out.data[i * 4 + 1] = out.data[i * 4 + 2] = v;
+      out.data[i * 4 + 3] = 255;
+    }
+    ug.putImageData(out, 0, 0);
+    return up;
+  }
+
+  // OCR lines → messages. Drops the status bar, header and input bar, bare
+  // times, receipts and dates; strips a trailing time from a message line.
+  function parseShot(lines, w, h) {
+    const kept = [];
+    for (const l of lines) {
+      let text = String(l.text || "").replace(/\s+/g, " ").trim();
+      if (!text || (l.confidence ?? 100) < 45) continue;
+      const { x0, y0, x1, y1 } = l.bbox;
+      if (y1 < h * 0.09 || y0 > h * 0.92) continue;
+      if (/^\d{1,2}[:.]\d{2}\s?([ap]\.?m\.?)?\s*[✓√v/]*$/i.test(text)) continue;
+      if (/^(today|yesterday|delivered|read( \d.*)?|seen|typing…?|online|last seen.*|\w{3},? \d{1,2} \w{3}.*|\d+ reply)$/i.test(text)) continue;
+      // Trailing time and ticks ("11:42pm ✓✓", which OCR may read as "4)"), and
+      // bubble-edge debris at the start.
+      text = text
+        .replace(/\s+\d{1,2}\s?[:.]\s?\d{2}\s?([ap]\.?\s?m\.?)?[^\p{L}]*$/iu, "")
+        .replace(/^[|\[\]{}()\\/]+\s*/, "")
+        .trim();
+      if (!text || !/[\p{L}\p{N}]/u.test(text)) continue;
+      kept.push({ text, x0, y0, x1, y1, lh: y1 - y0, side: w - x1 < x0 ? "me" : "them" });
+    }
+    kept.sort((a, b) => a.y0 - b.y0);
+    const bubbles = [];
+    for (const l of kept) {
+      const prev = bubbles[bubbles.length - 1];
+      if (prev && prev.side === l.side && l.y0 - prev.y1 < Math.max(prev.lh, l.lh) * 0.9) {
+        prev.text += ` ${l.text}`;
+        prev.x0 = Math.min(prev.x0, l.x0);
+        prev.x1 = Math.max(prev.x1, l.x1);
+        prev.y1 = l.y1;
+        prev.lines.push([l.x0, l.y0, l.x1, l.y1]);
+      } else {
+        bubbles.push({ ...l, lines: [[l.x0, l.y0, l.x1, l.y1]] });
+      }
+    }
+    return bubbles.slice(0, MAX_MESSAGES);
+  }
+
+  // Grow each bubble out from its text in its own colour (on a half-size grid),
+  // find the chat's background colour, and keep the text boxes.
+  function analyseShot(src, bubbles) {
+    const q = 2;
+    const w = Math.ceil(src.width / q);
+    const h = Math.ceil(src.height / q);
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const g = c.getContext("2d");
+    g.drawImage(src, 0, 0, w, h);
+    const d = g.getImageData(0, 0, w, h).data;
+    const keep = new Uint8Array(w * h);
+    const px = (x, y) => (y * w + x) * 4;
+    const diff = (i, col) => Math.max(Math.abs(d[i] - col[0]), Math.abs(d[i + 1] - col[1]), Math.abs(d[i + 2] - col[2]));
+
+    // Background first: the commonest colour outside the text boxes.
+    const inText = new Uint8Array(w * h);
+    for (const b of bubbles) {
+      for (let y = Math.floor(b.y0 / q); y <= Math.min(h - 1, Math.ceil(b.y1 / q)); y++) {
+        for (let x = Math.floor(b.x0 / q); x <= Math.min(w - 1, Math.ceil(b.x1 / q)); x++) inText[y * w + x] = 1;
+      }
+    }
+    const counts = new Map();
+    for (let i = 0; i < w * h; i += 3) {
+      if (inText[i]) continue;
+      const key = ((d[i * 4] >> 4) << 8) | ((d[i * 4 + 1] >> 4) << 4) | (d[i * 4 + 2] >> 4);
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    let bgKey = 0;
+    let bgN = -1;
+    for (const [key, n] of counts) if (n > bgN) { bgN = n; bgKey = key; }
+    const bg = [((bgKey >> 8) & 15) * 16 + 8, ((bgKey >> 4) & 15) * 16 + 8, (bgKey & 15) * 16 + 8];
+    const far = (a, z) => Math.max(Math.abs(a[0] - z[0]), Math.abs(a[1] - z[1]), Math.abs(a[2] - z[2]));
+
+    for (const b of bubbles) {
+      const bx0 = Math.max(0, Math.floor(b.x0 / q) - 5);
+      const by0 = Math.max(0, Math.floor(b.y0 / q) - 5);
+      const bx1 = Math.min(w - 1, Math.ceil(b.x1 / q) + 5);
+      const by1 = Math.min(h - 1, Math.ceil(b.y1 / q) + 5);
+      // The bubble's colour: the commonest colour inside the text box (the gaps
+      // between letters are bubble), and the flood starts from those pixels.
+      const tally = new Map();
+      const seeds = [];
+      for (let y = by0 + 5; y <= by1 - 5; y++) {
+        for (let x = bx0 + 5; x <= bx1 - 5; x++) {
+          const i = px(x, y);
+          const key = ((d[i] >> 3) << 10) | ((d[i + 1] >> 3) << 5) | (d[i + 2] >> 3);
+          tally.set(key, (tally.get(key) || 0) + 1);
+        }
+      }
+      let topKey = 0;
+      let topN = -1;
+      for (const [key, n] of tally) if (n > topN) { topN = n; topKey = key; }
+      const col = [((topKey >> 10) & 31) * 8 + 4, ((topKey >> 5) & 31) * 8 + 4, (topKey & 31) * 8 + 4];
+      b.colour = col;
+      const ring = [];
+      for (let y = by0 + 5; y <= by1 - 5; y += 2) for (let x = bx0 + 5; x <= bx1 - 5; x += 2) ring.push([x, y]);
+      const lim = [Math.max(0, bx0 - 45), Math.max(0, by0 - 45), Math.min(w - 1, bx1 + 45), Math.min(h - 1, by1 + 45)];
+      // Tight tolerance when the bubble is close to the background (dark mode).
+      const tol = clampN(far(col, bg) * 0.45, 5, 28);
+      const stack = [];
+      // A bubble the same colour as the background can't be traced: keep its text only.
+      if (far(col, bg) >= 12) for (const [x, y] of ring) if (diff(px(x, y), col) < tol) stack.push(x, y);
+      let rx0 = bx0, ry0 = by0, rx1 = bx1, ry1 = by1;
+      while (stack.length) {
+        const y = stack.pop();
+        const x = stack.pop();
+        if (x < lim[0] || y < lim[1] || x > lim[2] || y > lim[3]) continue;
+        const k = y * w + x;
+        if (keep[k] === 2) continue;
+        if (keep[k] !== 1 && diff(px(x, y), col) >= tol) continue;
+        keep[k] = 2;
+        rx0 = Math.min(rx0, x); ry0 = Math.min(ry0, y); rx1 = Math.max(rx1, x); ry1 = Math.max(ry1, y);
+        stack.push(x + 1, y, x - 1, y, x, y + 1, x, y - 1);
+      }
+      // The text itself always stays.
+      for (let y = by0; y <= by1; y++) for (let x = bx0; x <= bx1; x++) keep[y * w + x] = 2;
+      b.region = [rx0 * q, ry0 * q, (rx1 + 1) * q, (ry1 + 1) * q];
+    }
+
+    // Keep-mask canvas (1 cell dilation) and the bubble edge, for painting.
+    const mask = document.createElement("canvas");
+    mask.width = w;
+    mask.height = h;
+    const mg = mask.getContext("2d");
+    const md = mg.createImageData(w, h);
+    const edge = [];
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const k = y * w + x;
+        const on = keep[k] || keep[k - 1] || keep[k + 1] || keep[k - w] || keep[k + w];
+        if (on) md.data[k * 4 + 3] = 255;
+        if (keep[k] && (!keep[k - 1] || !keep[k + 1] || !keep[k - w] || !keep[k + w])) {
+          edge.push([x * q, y * q, Math.atan2(keep[k + w] - keep[k - w], keep[k + 1] - keep[k - 1]) + Math.PI / 2]);
+        }
+      }
+    }
+    mg.putImageData(md, 0, 0);
+    return { img: src, w: src.width, h: src.height, bubbles, bg, mask, edge };
+  }
+
+  // Place the screenshot in the 4:5 frame: words at the top for a character or
+  // torn edge, centred for a painting behind. The chat's clutter (status bar,
+  // header, input bar, wallpaper) goes; only the bubbles stay, on a flat ground.
+  let shotCache = { key: "", L: null };
+  function shotLayout(comp) {
+    const key = `${state.shotId}|${comp}`;
+    if (shotCache.key === key) return shotCache.L;
+    const A = state.shot;
+    const by0 = Math.min(...A.bubbles.map((b) => b.region[1]));
+    const by1 = Math.max(...A.bubbles.map((b) => b.region[3]));
+    const bx0 = Math.min(...A.bubbles.map((b) => b.region[0]));
+    const bx1 = Math.max(...A.bubbles.map((b) => b.region[2]));
+    // Zoom in so the text is big (about 60px lines), as far as the frame allows;
+    // a long bubble may run off the right edge, like a cropped screenshot.
+    const lineH = A.bubbles.flatMap((b) => b.lines.map((l) => l[3] - l[1])).sort((a, z) => a - z);
+    const medLine = lineH[lineH.length >> 1] || 40;
+    const fit = Math.min(W / A.w, (H - 180) / Math.max(1, by1 - by0));
+    const s = Math.min(Math.max(fit, 60 / medLine), (H - 180) / Math.max(1, by1 - by0), (W * 1.03) / Math.max(1, bx1 - bx0));
+    const dw = A.w * s;
+    const dh = A.h * s;
+    const ox = (bx1 - bx0) * s <= W - 60 ? W / 2 - ((bx0 + bx1) / 2) * s : 36 - bx0 * s;
+    const oy = comp === "full" ? H / 2 - ((by0 + by1) / 2) * s : 110 - by0 * s;
+
+    const base = document.createElement("canvas");
+    base.width = W;
+    base.height = H;
+    const g = base.getContext("2d");
+    g.fillStyle = rgba(A.bg, 1);
+    g.fillRect(0, 0, W, H);
+    const t = document.createElement("canvas");
+    t.width = W;
+    t.height = H;
+    const tg = t.getContext("2d");
+    tg.drawImage(A.img, ox, oy, dw, dh);
+    tg.globalCompositeOperation = "destination-in";
+    tg.drawImage(A.mask, ox, oy, dw, dh);
+    g.drawImage(t, 0, 0);
+
+    const keep = document.createElement("canvas");
+    keep.width = W;
+    keep.height = H;
+    keep.getContext("2d").drawImage(A.mask, ox, oy, dw, dh);
+
+    const map = ([x, y]) => [x * s + ox, y * s + oy];
+    const L = {
+      base, keep, s,
+      top: by0 * s + oy,
+      height: (by1 - by0) * s,
+      texts: A.bubbles.flatMap((b) => b.lines.map(([x0, y0, x1, y1]) => [...map([x0, y0]), ...map([x1, y1])])),
+      bubbles: A.bubbles.map((b) => ({ colour: b.colour, box: [...map(b.region.slice(0, 2)), ...map(b.region.slice(2))] })),
+      edge: A.edge.map(([x, y, a]) => [...map([x, y]), a]),
+    };
+    shotCache = { key, L };
+    return L;
+  }
+
+  function renderShot(look) {
+    const L = shotLayout(look.composition);
+    ctx.drawImage(L.base, 0, 0);
+    bgLumData = null;
+    if (!state.painting) return;
+    const comp = look.composition;
+    const t = document.createElement("canvas");
+    t.width = W;
+    t.height = H;
+    const tg = t.getContext("2d");
+    if (comp === "cutout") {
+      // The character steps in front of the chat, but never over the words.
+      tg.drawImage(cutoutLayer(), 0, 0);
+      for (const [x0, y0, x1, y1] of L.texts) tg.clearRect(x0 - 8, y0 - 6, x1 - x0 + 16, y1 - y0 + 12);
+      ctx.drawImage(t, 0, 0);
+    } else {
+      tg.drawImage(state.painting, 0, 0);
+      if (comp === "torn") {
+        tg.globalCompositeOperation = "destination-in";
+        tg.drawImage(buildMask(look, { top: L.top, height: L.height, space: "top", items: [] }), 0, 0);
+      }
+      tg.globalCompositeOperation = "destination-out";
+      tg.drawImage(L.keep, 0, 0);
+      ctx.drawImage(t, 0, 0);
+      // Paint the bubbles' edges in their own colour where the painting meets
+      // them, so they sit in the paint (never on bare ground).
+      const paint = tg.getImageData(0, 0, W, H).data;
+      const painted = (x, y) => {
+        const xi = Math.round(x);
+        const yi = Math.round(y);
+        return xi >= 0 && yi >= 0 && xi < W && yi < H && paint[(yi * W + xi) * 4 + 3] > 128;
+      };
+      const rnd = mulberry32(state.strokeSeed ^ 0x3c6ef372);
+      const every = Math.max(2, Math.round(9 - state.amount / 14));
+      L.edge.forEach(([ex, ey, a], i) => {
+        if (i % every || rnd() < 0.35) return;
+        const nx = Math.cos(a - Math.PI / 2);
+        const ny = Math.sin(a - Math.PI / 2); // points into the bubble
+        if (!painted(ex - nx * 8, ey - ny * 8) && !painted(ex + nx * 8, ey + ny * 8)) return;
+        const x = ex + nx * 3;
+        const y = ey + ny * 3;
+        const b = L.bubbles.find(({ box }) => x >= box[0] - 4 && x <= box[2] + 4 && y >= box[1] - 4 && y <= box[3] + 4);
+        if (!b) return;
+        paintMark(ctx, rnd() < 0.7 ? "flat" : "round", {
+          x, y, angle: a + (rnd() - 0.5) * 0.2, len: 16 + rnd() * 22, width: 6 + rnd() * 6,
+          color: shadeRgb(b.colour, (rnd() - 0.5) * 14), alpha: 0.95, ridge: 0.5,
+          seed: Math.floor(rnd() * 2 ** 31),
+        });
+      });
+    }
+  }
+
   // ── render ─────────────────────────────────────────────────────────────────
   let frame = 0;
   function scheduleRender() {
@@ -1778,6 +2112,11 @@
 
   function render() {
     const look = pickLook();
+    if (state.shot) {
+      renderShot(look);
+      surface();
+      return;
+    }
     const lay = layout(look);
     const strokes = generateStrokes(lay, look);
     if (state.painting) ctx.drawImage(background(look, lay), 0, 0);
@@ -1786,6 +2125,10 @@
     drawItems(lay);
     if (state.painting && look.occlude) drawOccluder(lay);
     for (const s of strokes) if (s.over) paintStroke(ctx, s);
+    surface();
+  }
+
+  function surface() {
     if (state.painting) {
       // Canvas weave and grain over everything, bubbles included, so the whole
       // piece reads as one painted surface rather than a picture with stickers.
@@ -1925,7 +2268,7 @@
   }
 
   let waitTimer = 0;
-  function setBusy(busy) {
+  function setBusy(busy, message) {
     state.busy = busy;
     els.paint.disabled = busy;
     els.again.disabled = busy || !state.painting;
@@ -1935,8 +2278,8 @@
     clearInterval(waitTimer);
     if (busy) {
       let i = 0;
-      els.overlayText.textContent = WAITING_LINES[0];
-      waitTimer = setInterval(() => {
+      els.overlayText.textContent = message || WAITING_LINES[0];
+      if (!message) waitTimer = setInterval(() => {
         i = Math.min(i + 1, WAITING_LINES.length - 1);
         els.overlayText.textContent = WAITING_LINES[i];
       }, 2800);
@@ -2087,6 +2430,13 @@
   els.time.addEventListener("input", () => { state.startTime = els.time.value; scheduleRender(); });
   els.meta.addEventListener("change", () => { state.showMeta = els.meta.checked; scheduleRender(); });
   els.amount.addEventListener("input", () => { state.amount = Number(els.amount.value); scheduleRender(); });
+  els.shot.addEventListener("change", () => { if (els.shot.files[0]) readScreenshot(els.shot.files[0]); });
+  els.clearShot.addEventListener("click", () => {
+    state.shot = null;
+    els.clearShot.hidden = true;
+    render();
+    setStatus("Screenshot removed. Type the chat, or upload another.");
+  });
   els.paint.addEventListener("click", paintIt);
   els.again.addEventListener("click", paintIt);
   els.repaint.addEventListener("click", () => { state.strokeSeed = randSeed(); render(); });
