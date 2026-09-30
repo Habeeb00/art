@@ -19,10 +19,11 @@
   const MAX_CHARS = 300;
   const PARAMS = new URLSearchParams(location.search);
   const DEMO = PARAMS.has("demo");
-  // ?preview paints with Pollinations' free, keyless models straight from the
-  // browser, using the same scene prompt as the worker. For trying real
+  // ?preview paints with Pollinations' free, keyless image model straight from
+  // the browser, from the same idea prompts as the worker. For trying real
   // paintings before a Cloudflare account exists.
   const PREVIEW = PARAMS.has("preview");
+  const ideasModule = import("./ideas.js");
 
   // Each chat style has a dark and a light theme; the theme follows whatever is
   // behind the bubbles, like a phone in dark or light mode.
@@ -107,24 +108,23 @@
       { side: "me", text: "me too", kind: "text" },
     ],
     style: "whatsapp",
-    mood: "auto",
+    ideaChoice: "auto",
     showMeta: true,
     startTime: "23:41",
     amount: 30,
     composition: "auto",
-    autoComposition: "full", // set from the scene writer's choice when a painting arrives
+    autoComposition: "full", // the chosen idea's placement, set when a painting arrives
     raw: null,              // the square painting as generated
     paintGround: [8, 8, 8], // flat background colour of a cut-out painting
     paintedCutout: null,    // the cut-out subject, repainted, on transparent
     paintingId: 0,
     painting: null,     // HTMLCanvasElement, painting cropped to 1080×1350
     paintData: null,    // Uint8ClampedArray of the painting's pixels
-    scene: null,
+    reading: null,          // { idea, matched, detail } for the current painting
     strokeSeed: randSeed(),
     busy: false,
   };
 
-  const strokeImages = []; // optional scanned brush strokes from /strokes/manifest.json
 
   // ── dom ────────────────────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
@@ -132,7 +132,7 @@
   const ctx = canvas.getContext("2d");
   const els = {
     list: $("messages"), add: $("add"), examples: $("examples"),
-    style: $("style"), composition: $("composition"), mood: $("mood"), time: $("time"), meta: $("meta"),
+    style: $("style"), composition: $("composition"), idea: $("idea"), time: $("time"), meta: $("meta"),
     paint: $("paint"), overlay: $("overlay"), overlayText: $("overlay-text"),
     status: $("status"), amount: $("amount"),
     repaint: $("repaint"), again: $("again"), download: $("download"),
@@ -377,7 +377,8 @@
     while (lay.height > H - margin * 2 && s > 0.5) lay = layoutAt((s -= 0.05), bleed);
 
     // The words sit in the painting's calm space; a cut-out's subject sits below them.
-    const space = look?.composition === "cutout" ? "top" : state.scene?.negative_space || "centre";
+    // The words sit at the top; the painting's subject lives below them.
+    const space = "top";
     let top;
     if (space === "top") top = margin * 1.1;
     else if (space === "bottom") top = H - margin - lay.height;
@@ -575,8 +576,8 @@
   }
 
   // ── look: composition + the painter's hand ─────────────────────────────────
-  // The composition comes with the painting (the scene writer picks a cut-out,
-  // or a scene); each Remix re-rolls the hand: its mix of oil tools,
+  // The composition comes with the painting (each idea has a placement, which
+  // you can override); each Remix re-rolls the hand: its mix of oil tools,
   // whether a bubble runs off the edge, whether the subject steps in front.
   function pickLook() {
     const rnd = mulberry32(state.strokeSeed ^ 0x5bd1e995);
@@ -717,7 +718,6 @@
       color2: c2,
       dry: s.dry ?? 0.1 + rnd() * 0.5,
       seed: Math.floor(rnd() * 2 ** 31),
-      image: tool === "impasto" && strokeImages.length && rnd() < 0.3 ? strokeImages[Math.floor(rnd() * strokeImages.length)] : null,
     };
     if (tool === "dab") {
       // Short, loaded, fat: impasto dabs.
@@ -896,7 +896,7 @@
 
   function paintStroke(c, s) {
     if (s.type === "knife") return drawKnife(c, s);
-    if (s.type === "impasto") return s.image ? drawImageStroke(c, s) : drawImpasto(c, s);
+    if (s.type === "impasto") return paintMark(c, "flat", s);
     if (s.type === "reveal") return drawReveal(c, s);
     return drawStroke(c, s);
   }
@@ -1223,6 +1223,208 @@
     return 0.299 * bgLumData[i] + 0.587 * bgLumData[i + 1] + 0.114 * bgLumData[i + 2];
   }
 
+  // ── the eleven strokes ─────────────────────────────────────────────────────
+  // Every painting is built from these eleven brush marks, in the painting's
+  // own colours. A scanned PNG in /strokes can stand in for any of them (see
+  // strokes/README.md).
+  const STROKE_TYPES = ["flat", "round", "filbert", "dry", "knife", "scumble", "dab", "fan", "rigger", "sweep", "stipple"];
+  const strokeStamps = {}; // type → [HTMLImageElement]
+
+  function paintMark(c, type, s) {
+    const stamps = strokeStamps[type];
+    if (stamps && stamps.length && (s.seed % 10) < 7) {
+      return drawImageStroke(c, { ...s, image: stamps[s.seed % stamps.length] });
+    }
+    switch (type) {
+      case "round": return drawRound(c, s);
+      case "filbert": return drawFilbert(c, s);
+      case "dry": return drawStroke(c, { ...s, color2: s.color2 || s.color, dry: 0.45 + (s.seed % 30) / 100, bend: 0.2 });
+      case "knife": return drawKnife(c, { ...s, color2: s.color2 || shadeRgb(s.color, 25) });
+      case "scumble": return drawScumble(c, s);
+      case "dab": return drawImpasto(c, { ...s, len: Math.min(s.len, s.width * 1.3), width: s.width * 1.2, ridge: 1.4 });
+      case "fan": return drawFan(c, s);
+      case "rigger": return drawRigger(c, s);
+      case "sweep": return drawSweep(c, s);
+      case "stipple": return drawStipple(c, s);
+      default: return drawImpasto(c, s); // flat
+    }
+  }
+
+  // Round brush: soft rounded ends, tapering off, a gentle ridge.
+  function drawRound(c, s) {
+    const rnd = mulberry32(s.seed);
+    const bend = (rnd() - 0.5) * s.len * 0.3;
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    c.lineCap = "round";
+    const pass = (w, col, a) => {
+      c.strokeStyle = rgba(col, a);
+      c.lineWidth = w;
+      c.beginPath();
+      c.moveTo(-s.len / 2, 0);
+      c.quadraticCurveTo(0, bend, s.len / 2, bend * 0.3);
+      c.stroke();
+    };
+    pass(s.width, s.color, s.alpha ?? 0.95);
+    pass(s.width * 0.45, shadeRgb(s.color, 18 + rnd() * 14), 0.35);
+    c.translate(0, -s.width * 0.28);
+    pass(Math.max(1, s.width * 0.12), [255, 255, 255], 0.3 * (s.ridge ?? 1));
+    c.restore();
+  }
+
+  // Filbert: an oval, leaf-shaped dab, full in the middle.
+  function drawFilbert(c, s) {
+    const rnd = mulberry32(s.seed);
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    const L = s.len / 2;
+    const w = s.width / 2;
+    c.beginPath();
+    c.moveTo(-L, 0);
+    c.bezierCurveTo(-L * 0.6, -w * 1.2, L * 0.5, -w, L, 0);
+    c.bezierCurveTo(L * 0.5, w, -L * 0.6, w * 1.2, -L, 0);
+    c.fillStyle = rgba(s.color, s.alpha ?? 0.95);
+    c.fill();
+    c.strokeStyle = rgba(shadeRgb(s.color, (rnd() - 0.5) * 50), 0.35);
+    c.lineWidth = w * 0.4;
+    c.beginPath();
+    c.moveTo(-L * 0.7, (rnd() - 0.5) * w);
+    c.quadraticCurveTo(0, (rnd() - 0.5) * w, L * 0.6, 0);
+    c.stroke();
+    c.strokeStyle = `rgba(255,255,255,${0.38 * (s.ridge ?? 1)})`;
+    c.lineWidth = Math.max(1, w * 0.18);
+    c.beginPath();
+    c.moveTo(-L * 0.55, -w * 0.62);
+    c.quadraticCurveTo(0, -w * 0.9, L * 0.5, -w * 0.45);
+    c.stroke();
+    c.restore();
+  }
+
+  // Scumble: thin paint scrubbed in loose loops, letting what's under show.
+  function drawScumble(c, s) {
+    const rnd = mulberry32(s.seed);
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    c.lineCap = "round";
+    const r = Math.max(s.width, s.len * 0.5);
+    for (let k = 0; k < 7; k++) {
+      c.strokeStyle = rgba(shadeRgb(s.color, (rnd() - 0.5) * 30), 0.28);
+      c.lineWidth = s.width * (0.35 + rnd() * 0.3);
+      c.beginPath();
+      c.ellipse((rnd() - 0.5) * r * 0.6, (rnd() - 0.5) * r * 0.4, r * (0.3 + rnd() * 0.4), r * (0.15 + rnd() * 0.25), rnd() * 3, 0, Math.PI * (1.2 + rnd()));
+      c.stroke();
+    }
+    c.restore();
+  }
+
+  // Fan brush: a feathered splay of fine hairs.
+  function drawFan(c, s) {
+    const rnd = mulberry32(s.seed);
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    const n = 14 + Math.floor(rnd() * 10);
+    for (let k = 0; k < n; k++) {
+      const spread = (k / (n - 1) - 0.5) * s.width * 1.6;
+      c.strokeStyle = rgba(shadeRgb(s.color, (rnd() - 0.5) * 40), 0.55 + rnd() * 0.3);
+      c.lineWidth = 1 + rnd() * 2;
+      c.beginPath();
+      c.moveTo(-s.len / 2, spread * 0.25);
+      c.quadraticCurveTo(0, spread * 0.7, s.len / 2 - rnd() * s.len * 0.3, spread);
+      c.stroke();
+    }
+    c.restore();
+  }
+
+  // Rigger: a long, thin, wavering line for contours and cracks.
+  function drawRigger(c, s) {
+    const rnd = mulberry32(s.seed);
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    c.lineCap = "round";
+    c.strokeStyle = rgba(s.color, 0.9);
+    c.lineWidth = Math.max(1.5, Math.min(5, s.width * 0.25));
+    c.beginPath();
+    const L = s.len * 1.3;
+    c.moveTo(-L / 2, 0);
+    for (let t = 1; t <= 6; t++) c.lineTo(-L / 2 + (t / 6) * L, (rnd() - 0.5) * s.width * 0.35);
+    c.stroke();
+    c.restore();
+  }
+
+  // Sweep: one long, loaded stroke that runs dry towards its end.
+  function drawSweep(c, s) {
+    const rnd = mulberry32(s.seed);
+    const L = s.len * 1.8;
+    const hw = s.width / 2;
+    const bend = (rnd() - 0.5) * s.width * 2.5;
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    const grad = c.createLinearGradient(-L / 2, 0, L / 2, 0);
+    grad.addColorStop(0, rgba(s.color, 0.97));
+    grad.addColorStop(0.7, rgba(s.color, 0.85));
+    grad.addColorStop(1, rgba(s.color, 0.15));
+    c.fillStyle = grad;
+    c.beginPath();
+    c.moveTo(-L / 2, -hw);
+    c.quadraticCurveTo(0, -hw + bend, L / 2, -hw * 0.4 + bend * 0.3);
+    c.lineTo(L / 2, hw * 0.2 + bend * 0.3);
+    c.quadraticCurveTo(0, hw + bend, -L / 2, hw);
+    c.closePath();
+    c.fill();
+    for (let k = 0; k < 4; k++) {
+      const y = (rnd() - 0.5) * hw * 1.4;
+      c.strokeStyle = rgba(shadeRgb(s.color, (rnd() - 0.5) * 50), 0.3);
+      c.lineWidth = Math.max(1, hw * 0.18);
+      c.beginPath();
+      c.moveTo(-L / 2, y);
+      c.quadraticCurveTo(0, y + bend, L / 2 - rnd() * L * 0.4, y * 0.4 + bend * 0.3);
+      c.stroke();
+    }
+    c.strokeStyle = `rgba(255,255,255,${0.3 * (s.ridge ?? 1)})`;
+    c.lineWidth = Math.max(1, hw * 0.15);
+    c.beginPath();
+    c.moveTo(-L / 2 + 4, -hw * 0.75);
+    c.quadraticCurveTo(0, -hw * 0.75 + bend, L * 0.3, -hw * 0.55 + bend * 0.5);
+    c.stroke();
+    c.restore();
+  }
+
+  // Stipple: a cluster of small tapped dots.
+  function drawStipple(c, s) {
+    const rnd = mulberry32(s.seed);
+    const r = Math.max(s.width, s.len * 0.4);
+    const n = 8 + Math.floor(rnd() * 12);
+    for (let k = 0; k < n; k++) {
+      const x = s.x + (rnd() - 0.5) * r * 1.6;
+      const y = s.y + (rnd() - 0.5) * r * 1.6;
+      const d = 2 + rnd() * s.width * 0.22;
+      c.fillStyle = rgba(shadeRgb(s.color, (rnd() - 0.5) * 40), 0.9);
+      c.beginPath();
+      c.ellipse(x, y, d, d * (0.6 + rnd() * 0.4), rnd() * 3, 0, Math.PI * 2);
+      c.fill();
+      c.fillStyle = "rgba(255,255,255,0.35)";
+      c.beginPath();
+      c.arc(x - d * 0.3, y - d * 0.3, d * 0.35, 0, Math.PI * 2);
+      c.fill();
+    }
+  }
+
+  // Which of the eleven marks a painter would reach for here.
+  function chooseMark(rnd, layerR, busy, edge) {
+    if (layerR >= 34) return weighted(rnd, busy ? { flat: 5, filbert: 3, knife: 2 } : { sweep: 4, flat: 4, scumble: 2 });
+    if (layerR >= 18) return weighted(rnd, busy
+      ? { flat: 3, filbert: 2.5, round: 2, dab: 1.5, knife: 1 }
+      : { flat: 4, sweep: 3, scumble: 1.5, dry: 1.5 });
+    if (layerR >= 9) return weighted(rnd, { round: 3.5, dab: 3, filbert: 2, fan: 1, stipple: 0.5 });
+    return weighted(rnd, edge ? { rigger: 5, round: 3, stipple: 2 } : { round: 5, stipple: 3, dab: 2 });
+  }
+
   // ── painterly repaint ──────────────────────────────────────────────────────
   // The model decides what is painted; this decides how it looks. Every
   // generated image is repainted by hand, stroke by stroke: thick impasto dabs
@@ -1290,9 +1492,9 @@
     }
 
     const layers = [
-      { r: 34, keep: () => true },
-      { r: 18, keep: (e) => e > eMid || rnd() < 0.35 },
-      { r: 9, keep: (e) => e > eHigh || rnd() < 0.08 },
+      { r: 40, keep: () => true },
+      { r: 22, keep: (e) => e > eMid || rnd() < 0.35 },
+      { r: 11, keep: (e) => e > eHigh || rnd() < 0.08 },
       { r: 5, keep: (e) => e > eTop }, // small details (faces, hands, a boat) survive
     ];
     let count = 0;
@@ -1324,8 +1526,11 @@
         col = saturate(shadeRgb(col, (rnd() - 0.5) * (calm ? 12 : 36)), 1.15);
         const flow = 0.5 * Math.atan2(2 * exy[i], exx[i] - eyy[i]) + Math.PI / 2;
         const angle = (e > eMid * 0.6 ? flow : hand + (rnd() - 0.5) * 0.8) + (rnd() - 0.5) * 0.35;
-        drawImpasto(g, {
-          x, y, angle, color: col,
+        const edge = e > eTop;
+        const mark = chooseMark(rnd, layer.r, !calm, edge);
+        paintMark(g, mark, {
+          x, y, angle,
+          color: mark === "rigger" ? shadeRgb(col, -45) : col,
           len: layer.r * (1.2 + rnd() * rnd() * 3.6) * (calm ? 1.6 : 1),
           width: layer.r * (0.9 + rnd() * 0.6),
           seed: Math.floor(rnd() * 2 ** 31),
@@ -1623,94 +1828,46 @@
 
     setBusy(true);
     try {
-      let data;
-      if (DEMO) data = await demoPainting(state.composition);
-      else if (PREVIEW) data = await previewPainting(messages);
-      else {
+      const { readConversation, ideaById, ideaPrompt } = await ideasModule;
+      const reading = readConversation(messages);
+      if (reading.blocked) throw new Error("We can't paint this one. Try a different conversation.");
+      const idea = (state.ideaChoice !== "auto" && ideaById(state.ideaChoice)) || reading.idea;
+      const placement = state.composition === "auto" ? idea.placement : state.composition;
+
+      let image;
+      if (DEMO) image = (await demoPainting(placement)).image;
+      else if (PREVIEW) {
+        image = `https://image.pollinations.ai/prompt/${encodeURIComponent(ideaPrompt(idea, placement, reading.detail))}` +
+          `?width=1024&height=1024&model=flux&nologo=true&enhance=false&private=true&seed=${randSeed()}`;
+      } else {
         let res;
         try {
           res = await fetch("/api/paint", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ messages, mood: state.mood, composition: state.composition }),
+            body: JSON.stringify({ messages, idea: idea.id, placement }),
           });
         } catch {
           throw new Error("Couldn't reach the painter. Check your connection and try again.");
         }
-        data = await res.json().catch(() => ({}));
+        const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.image) throw new Error(data.error || `Something went wrong (${res.status}). Try again.`);
+        image = data.image;
       }
-      await setPainting(data.image);
-      state.scene = data.scene || null;
-      state.autoComposition = compositionFor(state.scene?.treatment);
+      await setPainting(image);
+      state.reading = { idea, matched: reading.matched, detail: reading.detail };
+      state.autoComposition = placement;
       state.strokeSeed = randSeed();
       render();
-      setStatus(state.scene?.emotional_core ? `“${state.scene.emotional_core}”` : "Painted.", false, true);
-      if (PREVIEW && state.scene) {
-        // No console on a phone: show what the scene writer decided, for screenshots.
-        const sc = state.scene;
-        els.status.textContent += `\n\n${sc.treatment}${sc.treatment === "cutout" ? ` on ${sc.ground}` : ""} · ${sc.mood}\n${sc.subtext}\n\n${sc.image_prompt}`;
-        els.status.style.whiteSpace = "pre-line";
-      }
+      const why = reading.matched.length && idea === reading.idea
+        ? `Picked from: ${reading.matched.slice(0, 4).map((m) => `“${m}”`).join(", ")}`
+        : idea === reading.idea ? "Nothing specific to read, so: waiting." : "Your choice.";
+      setStatus(`“${idea.caption}”\n${idea.name}: ${idea.feeling}\n${why}`, false, true);
     } catch (err) {
       setStatus(err.message || "Something went wrong. Try again.", true);
     } finally {
       setBusy(false);
     }
-  }
-
-  // Pollinations: an OpenAI-compatible text endpoint for the scene, and FLUX
-  // for the painting. No key; slower and less predictable than Workers AI.
-  async function previewPainting(messages) {
-    const { sceneMessages, readScene, imagePrompt, isSceneReply } = await import("./scene.js");
-    const chat = sceneMessages(messages, state.mood);
-    const content = (j) => {
-      const m = j?.choices?.[0]?.message;
-      return m?.content || m?.reasoning_content || (typeof j === "string" ? j : "");
-    };
-    const post = (model) => async () => {
-      const res = await fetch("https://text.pollinations.ai/openai", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model, messages: chat, seed: randSeed() }),
-      });
-      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`);
-      return content(await res.json());
-    };
-    const get = async () => {
-      const system = `${chat[0].content}\n\nExample reply:\n${chat[2].content}`;
-      const res = await fetch(`https://text.pollinations.ai/${encodeURIComponent(chat[3].content)}` +
-        `?model=openai&json=true&seed=${randSeed()}&system=${encodeURIComponent(system)}`);
-      if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 120)}`);
-      return res.text();
-    };
-
-    // Try a few routes; never paint a stock scene when the writer didn't answer.
-    let raw = null;
-    let last = "";
-    for (const attempt of [post("openai"), get, post("mistral")]) {
-      try {
-        const reply = await attempt();
-        if (isSceneReply(reply)) { raw = reply; break; }
-        last = String(reply).slice(0, 140);
-      } catch (err) {
-        last = String(err.message || err).slice(0, 140);
-      }
-    }
-    if (raw === null) {
-      throw new Error(`The scene writer didn't answer properly, so nothing was painted. Try again in a moment.\n(Reply: ${last || "empty"})`);
-    }
-    const scene = readScene(raw, state.mood, state.composition);
-    if (scene.refused) throw new Error("We can't paint this one. Try a different conversation.");
-    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(imagePrompt(scene))}` +
-      `?width=1024&height=1024&model=flux&nologo=true&enhance=false&private=true&seed=${randSeed()}`;
-    console.info("Unsaid preview scene", scene);
-    return { image: url, scene };
-  }
-
-  function compositionFor(treatment) {
-    if (treatment === "cutout") return "cutout";
-    return Math.random() < 0.6 ? "full" : "torn";
   }
 
   async function setPainting(src) {
@@ -1821,8 +1978,7 @@
     const g = c.getContext("2d");
     const rnd = mulberry32(randSeed());
     const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
-    const treatment = composition === "cutout" ? "cutout"
-      : composition === "auto" ? pick(["cutout", "scene"]) : "scene";
+    const treatment = composition === "cutout" ? "cutout" : "scene";
     const stroke = (x, y, angle, len, width, colors, dry = 0.1 + rnd() * 0.4) => drawStroke(g, {
       x, y, angle, len, width, color: pick(colors), color2: pick(colors), dry, seed: Math.floor(rnd() * 2 ** 31),
     });
@@ -1872,17 +2028,23 @@
   }
 
   // ── optional scanned strokes ───────────────────────────────────────────────
+  // strokes/manifest.json is either a list of files (used for any mark) or a
+  // map from mark type to file(s), e.g. { "flat": ["flat-1.png"], "fan": "fan.png" }.
   async function loadStrokeImages() {
     try {
       const res = await fetch("strokes/manifest.json", { cache: "no-cache" });
       if (!res.ok) return;
-      const files = await res.json();
-      if (!Array.isArray(files)) return;
-      const imgs = await Promise.all(files.slice(0, 40).map((f) => loadImage(`strokes/${f}`).catch(() => null)));
-      strokeImages.push(...imgs.filter(Boolean));
-      if (strokeImages.length && state.painting) scheduleRender();
+      const manifest = await res.json();
+      const entries = Array.isArray(manifest)
+        ? manifest.map((f) => ["flat", f])
+        : Object.entries(manifest).flatMap(([type, files]) => [].concat(files).map((f) => [type, f]));
+      for (const [type, file] of entries.slice(0, 60)) {
+        if (!STROKE_TYPES.includes(type)) continue;
+        const img = await loadImage(`strokes/${file}`).catch(() => null);
+        if (img) (strokeStamps[type] ||= []).push(img);
+      }
     } catch {
-      // No manifest: drawn strokes only.
+      // No manifest: the eleven drawn marks only.
     }
   }
 
@@ -1921,7 +2083,7 @@
   });
   els.style.addEventListener("change", () => { state.style = els.style.value; scheduleRender(); });
   els.composition.addEventListener("change", () => { state.composition = els.composition.value; scheduleRender(); });
-  els.mood.addEventListener("change", () => { state.mood = els.mood.value; });
+  els.idea.addEventListener("change", () => { state.ideaChoice = els.idea.value; });
   els.time.addEventListener("input", () => { state.startTime = els.time.value; scheduleRender(); });
   els.meta.addEventListener("change", () => { state.showMeta = els.meta.checked; scheduleRender(); });
   els.amount.addEventListener("input", () => { state.amount = Number(els.amount.value); scheduleRender(); });
@@ -1930,11 +2092,21 @@
   els.repaint.addEventListener("click", () => { state.strokeSeed = randSeed(); render(); });
   els.download.addEventListener("click", download);
 
+  // The idea book (public/ideas.js): fills the Idea picker.
+  ideasModule.then(({ IDEAS }) => {
+    for (const idea of IDEAS) {
+      const o = document.createElement("option");
+      o.value = idea.id;
+      o.textContent = `${idea.name} (${idea.feeling})`;
+      els.idea.append(o);
+    }
+  }).catch(() => {});
+
   renderExamples();
   renderList();
   render();
   if (DEMO) setStatus("Demo mode: random local paint, not AI, so it won't match your words.");
-  if (PREVIEW) setStatus("Preview mode: real paintings from Pollinations' free models, painted from your browser.");
+  if (PREVIEW) setStatus("Preview mode: real paintings from Pollinations' free image model, painted from your browser.");
   loadStrokeImages();
   // Canvas text needs the web fonts (Malayalam especially) before it looks right.
   Promise.all([

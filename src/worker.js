@@ -1,19 +1,15 @@
 // Unsaid — /api/paint
-// conversation → scene JSON (Llama) → painting (FLUX.1 schnell).
-// Nothing is stored: messages pass through and are gone.
+// conversation → an idea from the idea book (public/ideas.js, clear rules, no
+// model) → painting (FLUX.1 schnell). The page then repaints it with its own
+// eleven strokes. Nothing is stored: messages pass through and are gone.
 
-import { COMPOSITIONS, sceneMessages, readScene, imagePrompt, isSceneReply } from "../public/scene.js";
+import { IDEAS, PLACEMENTS, readConversation, ideaById, ideaPrompt } from "../public/ideas.js";
 
-// The scene writer decides whether the painting reads emotionally, so it defaults
-// to Llama 3.3 70B. It costs more of the free daily allowance than 8B; set
-// SCENE_MODEL = "@cf/meta/llama-3.1-8b-instruct" in wrangler.toml for more paintings a day.
-const DEFAULT_SCENE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
 const MAX_MESSAGES = 20;
 const MAX_CHARS = 300;
 const MAX_BODY_BYTES = 20_000;
-const MOODS = ["auto", "tender", "angry", "distant", "nostalgic"];
 
 export default {
   async fetch(request, env) {
@@ -59,27 +55,21 @@ async function paint(request, env) {
     clean.push({ side, text, kind });
   }
   if (!clean.some((m) => m.kind !== "typing")) return json({ error: "Write at least one message." }, 400);
-  const mood = MOODS.includes(body?.mood) ? body.mood : "auto";
-  const composition = COMPOSITIONS.includes(body?.composition) ? body.composition : "auto";
+  // 2. The idea: read from the messages, or picked on the page.
+  const reading = readConversation(clean);
+  if (reading.blocked) {
+    return json({ error: "We can't paint this one. Try a different conversation.", refused: true }, 422);
+  }
+  const idea = ideaById(body?.idea) || reading.idea;
+  const placement = PLACEMENTS.includes(body?.placement) && body.placement !== "auto" ? body.placement : idea.placement;
 
-  // 2. Per-IP daily limit (only when KV is bound)
+  // 3. Per-IP daily limit (only when KV is bound)
   const limitKey = await checkLimit(request, env);
   if (limitKey instanceof Response) return limitKey;
 
-  // 3. Scene
-  const scene = await writeScene(env, clean, mood, composition);
-
-  // 4. No scene, or a refusal
-  if (!scene) {
-    return json({ error: "The scene writer didn't answer properly, so nothing was painted. Try again in a moment." }, 502);
-  }
-  if (scene.refused) {
-    return json({ error: "We can't paint this one. Try a different conversation.", refused: true }, 422);
-  }
-
-  // 5. Painting
+  // 4. Painting
   const result = await env.AI.run(IMAGE_MODEL, {
-    prompt: imagePrompt(scene),
+    prompt: ideaPrompt(idea, placement, reading.detail),
     steps: 8,
     seed: Math.floor(Math.random() * 2_147_483_647),
   });
@@ -87,32 +77,14 @@ async function paint(request, env) {
 
   if (limitKey) await bumpLimit(env, limitKey);
 
-  // 6. Respond (1024×1024 JPEG; the browser crops to 4:5)
-  return json({ image: `data:image/jpeg;base64,${result.image}`, scene });
-}
-
-// Returns null when the writer doesn't produce a usable scene after a retry:
-// better no painting than a stock one that has nothing to do with the words.
-async function writeScene(env, messages, mood, composition) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let raw = "";
-    try {
-      const out = await env.AI.run(env.SCENE_MODEL || DEFAULT_SCENE_MODEL, {
-        messages: sceneMessages(messages, mood),
-        max_tokens: 500,
-        temperature: 0.8,
-      });
-      raw = out?.response ?? "";
-    } catch (err) {
-      if (isQuotaError(err)) throw err;
-      console.error("scene model failed", err);
-    }
-    if (isSceneReply(raw)) return readScene(raw, mood, composition);
-    // The model's own safety refusal comes back as prose, not JSON.
-    const scene = readScene(raw, mood, composition);
-    if (scene.refused) return scene;
-  }
-  return null;
+  // 5. Respond (1024×1024 JPEG; the page crops, repaints and composes it)
+  return json({
+    image: `data:image/jpeg;base64,${result.image}`,
+    idea: { id: idea.id, name: idea.name, caption: idea.caption, feeling: idea.feeling },
+    placement,
+    matched: reading.matched,
+    ideas: IDEAS.length,
+  });
 }
 
 // ── rate limit ──────────────────────────────────────────────────────────────
