@@ -133,7 +133,8 @@
   const ctx = canvas.getContext("2d");
   const els = {
     list: $("messages"), add: $("add"), examples: $("examples"),
-    style: $("style"), composition: $("composition"), idea: $("idea"), shot: $("shot"), mal: $("mal"), clearShot: $("clear-shot"), time: $("time"), meta: $("meta"),
+    style: $("style"), composition: $("composition"), idea: $("idea"), shot: $("shot"), mal: $("mal"), clearShot: $("clear-shot"),
+    start: $("start"), why: $("why"), typeInstead: $("type-instead"), frame: $("frame"), compose: $("compose"), time: $("time"), meta: $("meta"),
     paint: $("paint"), overlay: $("overlay"), overlayText: $("overlay-text"),
     status: $("status"), amount: $("amount"),
     repaint: $("repaint"), again: $("again"), download: $("download"),
@@ -230,6 +231,7 @@
       chip.textContent = name;
       chip.addEventListener("click", () => {
         state.messages = EXAMPLES[name].map(([side, text, kind]) => ({ side, text, kind: kind || "text" }));
+        els.start.hidden = true;
         renderList();
         scheduleRender();
       });
@@ -1786,8 +1788,9 @@
   }
 
   async function readScreenshot(file) {
-    if (state.busy) return;
+    if (state.busy || !file || !/^image\//.test(file.type)) return;
     setBusy(true, "Reading the chat…");
+    let ok = false;
     try {
       const url = URL.createObjectURL(file);
       const img = await loadImage(url);
@@ -1808,14 +1811,17 @@
       state.shot = analyseShot(c, bubbles);
       state.shotId = (state.shotId || 0) + 1;
       els.clearShot.hidden = false;
+      els.start.hidden = true;
       render();
-      setStatus(`Read ${bubbles.length} message${bubbles.length > 1 ? "s" : ""}. Check them below (they decide the idea), then tap Paint it.`);
+      ok = true;
     } catch (err) {
       setStatus(err.message || "Couldn't read that screenshot.", true);
     } finally {
       setBusy(false);
       els.shot.value = "";
     }
+    // Straight on to painting: one upload, one painting.
+    if (ok) await paintIt();
   }
 
   // Chats mix light-on-dark and dark-on-light text (white on a blue bubble,
@@ -2169,6 +2175,7 @@
       .map((m) => ({ side: m.side, text: m.text.trim(), kind: m.kind }));
     if (!messages.some((m) => m.kind !== "typing")) return setStatus("Write at least one message first.", true);
 
+    els.start.hidden = true;
     setBusy(true);
     try {
       const { readConversation, ideaById, ideaPrompt } = await ideasModule;
@@ -2205,7 +2212,8 @@
       const why = reading.matched.length && idea === reading.idea
         ? `Picked from: ${reading.matched.slice(0, 4).map((m) => `“${m}”`).join(", ")}`
         : idea === reading.idea ? "Nothing specific to read, so: waiting." : "Your choice.";
-      setStatus(`“${idea.caption}”\n${idea.name}: ${idea.feeling}\n${why}`, false, true);
+      setStatus(`“${idea.caption}”`, false, true);
+      els.why.textContent = `${idea.name} (${idea.feeling}). ${why}`;
     } catch (err) {
       setStatus(err.message || "Something went wrong. Try again.", true);
     } finally {
@@ -2289,6 +2297,7 @@
 
   function setStatus(text, error = false, scene = false) {
     els.status.textContent = text;
+    if (!scene) els.why.textContent = "";
     els.status.style.whiteSpace = "pre-line";
     els.status.classList.toggle("error", error);
     els.status.classList.toggle("scene-core", scene);
@@ -2426,16 +2435,38 @@
   });
   els.style.addEventListener("change", () => { state.style = els.style.value; scheduleRender(); });
   els.composition.addEventListener("change", () => { state.composition = els.composition.value; scheduleRender(); });
-  els.idea.addEventListener("change", () => { state.ideaChoice = els.idea.value; });
+  els.idea.addEventListener("change", () => {
+    state.ideaChoice = els.idea.value;
+    if (state.painting) paintIt(); // a new idea needs a new painting
+  });
   els.time.addEventListener("input", () => { state.startTime = els.time.value; scheduleRender(); });
   els.meta.addEventListener("change", () => { state.showMeta = els.meta.checked; scheduleRender(); });
   els.amount.addEventListener("input", () => { state.amount = Number(els.amount.value); scheduleRender(); });
   els.shot.addEventListener("change", () => { if (els.shot.files[0]) readScreenshot(els.shot.files[0]); });
+  els.typeInstead.addEventListener("click", () => {
+    els.start.hidden = true;
+    els.compose.open = true;
+    els.compose.scrollIntoView({ behavior: "smooth", block: "start" });
+    els.list.querySelector("input")?.focus();
+  });
+  els.compose.addEventListener("toggle", () => { if (els.compose.open && !state.shot) els.start.hidden = true; });
+  // On a laptop: drag a screenshot onto the frame, or paste it.
+  els.frame.addEventListener("dragover", (e) => { e.preventDefault(); els.frame.classList.add("drag"); });
+  els.frame.addEventListener("dragleave", () => els.frame.classList.remove("drag"));
+  els.frame.addEventListener("drop", (e) => {
+    e.preventDefault();
+    els.frame.classList.remove("drag");
+    readScreenshot(e.dataTransfer.files[0]);
+  });
+  window.addEventListener("paste", (e) => {
+    const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+    if (item) readScreenshot(item.getAsFile());
+  });
   els.clearShot.addEventListener("click", () => {
     state.shot = null;
     els.clearShot.hidden = true;
     render();
-    setStatus("Screenshot removed. Type the chat, or upload another.");
+    setStatus("Screenshot removed. Type a chat, or upload another.");
   });
   els.paint.addEventListener("click", paintIt);
   els.again.addEventListener("click", paintIt);
@@ -2456,7 +2487,6 @@
   renderList();
   render();
   if (DEMO) setStatus("Demo mode: random local paint, not AI, so it won't match your words.");
-  if (PREVIEW) setStatus("Preview mode: real paintings from Pollinations' free image model, painted from your browser.");
   loadStrokeImages();
   // Canvas text needs the web fonts (Malayalam especially) before it looks right.
   Promise.all([
