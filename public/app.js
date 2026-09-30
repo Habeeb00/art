@@ -86,6 +86,8 @@
     showMeta: true,
     startTime: "23:41",
     amount: 55,
+    composition: "auto",
+    paintingId: 0,
     painting: null,     // HTMLCanvasElement, painting cropped to 1080×1350
     paintData: null,    // Uint8ClampedArray of the painting's pixels
     scene: null,
@@ -101,7 +103,7 @@
   const ctx = canvas.getContext("2d");
   const els = {
     list: $("messages"), add: $("add"), examples: $("examples"),
-    style: $("style"), mood: $("mood"), time: $("time"), meta: $("meta"),
+    style: $("style"), composition: $("composition"), mood: $("mood"), time: $("time"), meta: $("meta"),
     paint: $("paint"), overlay: $("overlay"), overlayText: $("overlay-text"),
     status: $("status"), amount: $("amount"),
     repaint: $("repaint"), again: $("again"), download: $("download"),
@@ -315,6 +317,7 @@
     top = Math.max(margin * 0.6, top);
     for (const it of lay.items) it.y += top;
     lay.top = top;
+    lay.space = space;
     return lay;
   }
 
@@ -346,11 +349,7 @@
   }
 
   // ── drawing: background ────────────────────────────────────────────────────
-  function drawBackground() {
-    if (state.painting) {
-      ctx.drawImage(state.painting, 0, 0);
-      return;
-    }
+  function drawPlain() {
     ctx.fillStyle = STYLES[state.style].bg;
     ctx.fillRect(0, 0, W, H);
     ctx.drawImage(grain(), 0, 0, W, H);
@@ -359,18 +358,20 @@
   // ── drawing: bubbles ───────────────────────────────────────────────────────
   function drawItems(lay) {
     const S = STYLES[state.style];
-    const onPaint = !!state.painting;
     for (const it of lay.items) {
       if (it.type === "bubble") drawBubble(it, lay, S);
-      else drawCaption(it, lay, onPaint);
+      else drawCaption(it, lay);
     }
   }
 
-  function drawCaption(it, lay, onPaint) {
+  function drawCaption(it, lay) {
+    const cx = it.type === "receipt" ? it.x - 60 : W / 2;
+    const bright = state.painting ? bgLuminance(cx, it.y + it.h / 2) > 150 : state.style === "imessage";
+    const onPaint = state.painting && !bright;
     ctx.save();
     ctx.font = `${it.type === "header" ? "500 " : ""}${lay.metaFs}px ${FF}`;
     ctx.textBaseline = "middle";
-    ctx.fillStyle = onPaint ? "rgba(255,255,255,0.94)" : "#8E8E93";
+    ctx.fillStyle = onPaint ? "rgba(255,255,255,0.94)" : bright && state.painting ? "rgba(40,36,32,0.85)" : "#8E8E93";
     if (onPaint) {
       ctx.shadowColor = "rgba(0,0,0,0.55)";
       ctx.shadowBlur = 8;
@@ -388,7 +389,7 @@
   function drawBubble(b, lay, S) {
     const me = b.side === "me";
     ctx.save();
-    bubblePath(b.x, b.y, b.w, b.h, lay.radius, b.tail, lay.scale);
+    bubblePath(ctx, b.x, b.y, b.w, b.h, lay.radius, b.tail, lay.scale);
     ctx.fillStyle = me ? S.me : S.them;
     ctx.fill();
 
@@ -432,9 +433,10 @@
   }
 
   // Rounded rectangle with an optional tail: tr/tl (WhatsApp, top) or br/bl (iMessage, bottom).
-  function bubblePath(x, y, w, h, r, tail, s) {
+  function bubblePath(c, x, y, w, h, r, tail, s) {
     r = Math.min(r, h / 2, w / 2);
     const t = 16 * s;
+    const ctx = c;
     ctx.beginPath();
     if (tail === "tr") {
       ctx.moveTo(x + r, y);
@@ -472,76 +474,178 @@
     ctx.closePath();
   }
 
+  // ── look: composition + the painter's hand ─────────────────────────────────
+  // Each painting (and each Remix) gets its own composition and its own mix of
+  // tools, so no two pieces are worked the same way.
+  function pickLook() {
+    const rnd = mulberry32(state.strokeSeed ^ 0x5bd1e995);
+    const auto = weighted(rnd, { full: 0.4, torn: 0.35, island: 0.25 });
+    return {
+      composition: state.composition === "auto" ? auto : state.composition,
+      ground: rnd() < 0.55 ? [13, 11, 10] : [236, 228, 212],
+      hand: {
+        bristle: 0.25 + rnd() * 0.75,
+        knife: rnd() * 0.8,
+        dab: rnd() * 0.7,
+        scribble: rnd() < 0.65 ? 0.2 + rnd() * 0.8 : 0,
+      },
+    };
+  }
+
   // ── paint-over strokes ─────────────────────────────────────────────────────
   // Strokes are generated from the seed and the layout, so typing keeps them
-  // steady and "Repaint strokes" (a new seed) reshuffles them instantly.
-  function generateStrokes(lay) {
+  // steady and Remix (a new seed) reshuffles them instantly. Every bubble gets
+  // its own treatment: left clean, worked along one stretch of edge, a cluster
+  // at a corner, a halo underneath, scribbled on, or partly swallowed by paint.
+  function generateStrokes(lay, look) {
     const a = state.amount / 100;
     const strokes = [];
     if (!state.paintData || a <= 0) return strokes;
 
-    lay.items.forEach((b, j) => {
-      if (b.type !== "bubble") return;
+    const bubbles = lay.items.filter((it) => it.type === "bubble");
+    let swallowed = 0;
+    const maxSwallow = Math.max(1, Math.round(bubbles.length / 3));
+
+    bubbles.forEach((b, j) => {
       const rnd = mulberry32(state.strokeSeed + j * 7919);
       const palette = samplePalette(b, rnd);
+      const quiet = look.composition === "full" ? 1 : 0.7; // torn edges already do some of the work
+      let treatment = weighted(rnd, {
+        clean: 0.45 - 0.35 * a,
+        edge: 0.35 * quiet,
+        corner: 0.22,
+        halo: 0.14,
+        swallow: b.w > 220 && swallowed < maxSwallow ? 0.04 + 0.4 * a * a : 0,
+        scribble: look.hand.scribble * 0.35,
+      });
+      const add = (s) => strokes.push(makeStroke(rnd, palette, look, s));
       const perim = 2 * (b.w + b.h);
-      const count = Math.round(a * perim / 85) + 1;
 
-      for (let k = 0; k < count; k++) {
-        const e = edgePoint(b, rnd() * perim);
-        const over = rnd() < 0.1 + 0.3 * a;
-        const width = (14 + rnd() * 36) * (0.8 + 0.4 * a);
-        const len = (70 + rnd() * 200) * (0.7 + 0.6 * a);
-        // Over-strokes hug the edge; only at high amounts do they cut across it.
-        const diagonal = over ? a > 0.75 && rnd() < 0.15 : rnd() < 0.2;
-        const angle = Math.atan2(e.ty, e.tx) + (diagonal ? (rnd() < 0.5 ? -1 : 1) * (0.5 + rnd() * 0.6) : (rnd() - 0.5) * (over ? 0.16 : 0.5));
+      if (treatment === "clean") {
+        if (rnd() < 0.4) add(edgeStroke(b, rnd() * perim, rnd, a, false));
+        return;
+      }
 
-        let offset;
-        if (over) {
-          // How far the stroke bites into the bubble: a nibble at low amounts, into the words at high.
-          const edgeScale = e.horizontal ? 0.6 : 1;
-          const intrusion = (3 + rnd() * (5 + 34 * a * a)) * edgeScale;
-          offset = width / 2 - intrusion;
-        } else {
-          offset = -width * 0.3 + rnd() * width * 1.3;
+      if (treatment === "edge") {
+        const u0 = rnd() * perim;
+        const arc = perim * (0.18 + rnd() * 0.45);
+        const n = Math.round(1 + a * 7 * (arc / perim) * 2.2 + rnd() * 2);
+        for (let k = 0; k < n; k++) add(edgeStroke(b, (u0 + rnd() * arc) % perim, rnd, a, rnd() < 0.1 + 0.35 * a));
+      }
+
+      if (treatment === "corner") {
+        const cx = rnd() < 0.5 ? b.x : b.x + b.w;
+        const cy = rnd() < 0.5 ? b.y : b.y + b.h;
+        const n = 3 + Math.round(rnd() * 3 + a * 3);
+        for (let k = 0; k < n; k++) {
+          const w = 12 + rnd() * 30;
+          add({
+            x: cx + (rnd() - 0.5) * 90, y: cy + (rnd() - 0.5) * 70,
+            angle: rnd() * Math.PI * 2, len: 40 + rnd() * 110, width: w,
+            over: rnd() < 0.2 + 0.3 * a, dry: 0.15 + rnd() * 0.5,
+          });
         }
+      }
 
-        strokes.push(makeStroke(rnd, palette, {
-          x: e.x + e.nx * offset,
-          y: e.y + e.ny * offset,
-          angle, len, width, over,
-          bend: over ? 0.06 : 0.25,
-        }));
+      if (treatment === "halo") {
+        const n = 3 + Math.round(rnd() * 3 + a * 4);
+        for (let k = 0; k < n; k++) {
+          const s = edgeStroke(b, rnd() * perim, rnd, a, false);
+          s.width *= 1.5;
+          s.len *= 1.3;
+          add(s);
+        }
+      }
+
+      if (treatment === "swallow") {
+        swallowed++;
+        // Mostly the tail end of the line goes under ("and you just igno…"), so it still reads.
+        const side = rnd() < 0.85 ? "right" : "left";
+        const f = side === "right" ? 0.1 + rnd() * 0.22 * (0.5 + a) : 0.06 + rnd() * 0.08;
+        strokes.push({ type: "reveal", over: true, bubble: b, side, f, radius: lay.radius, scale: lay.scale, padX: lay.padX, seed: Math.floor(rnd() * 2 ** 31) });
+        // Texture on the new edge of the paint.
+        const edgeX = side === "right" ? b.x + b.w * (1 - f) : b.x + Math.min(b.w * f, lay.padX * 1.1);
+        for (let k = 0; k < 2 + rnd() * 3; k++) {
+          add({
+            x: edgeX + (rnd() - 0.5) * 30, y: b.y + rnd() * b.h,
+            angle: Math.PI / 2 + (rnd() - 0.5) * 0.7, len: b.h * (0.6 + rnd() * 0.8),
+            width: 10 + rnd() * 22, over: true, dry: 0.3 + rnd() * 0.4, tool: "bristle",
+          });
+        }
+        if (rnd() < 0.5) add(edgeStroke(b, rnd() * perim, rnd, a, false));
+      }
+
+      if (treatment === "scribble" || (look.hand.scribble && rnd() < look.hand.scribble * 0.25)) {
+        const n = 1 + Math.round(rnd() * 2);
+        for (let k = 0; k < n; k++) {
+          const e = edgePoint(b, rnd() * perim);
+          const out = -10 + rnd() * 50;
+          add({
+            tool: "scribble",
+            x: e.x + e.nx * out, y: e.y + e.ny * out,
+            angle: Math.atan2(e.ty, e.tx) + (rnd() - 0.5) * 0.8,
+            size: 70 + rnd() * 170, width: 4 + rnd() * 7,
+            kind: weighted(rnd, { zigzag: 1, loop: 0.8, wave: 0.7 }),
+            over: rnd() < 0.35 + 0.3 * a,
+          });
+        }
       }
 
       // At high paint amounts a stroke occasionally crosses a word.
-      if (a > 0.6 && rnd() < (a - 0.6) * 1.6 && b.lines.length) {
+      if (a > 0.6 && rnd() < (a - 0.6) * 1.2 && b.lines.length && treatment !== "clean") {
         const line = Math.floor(rnd() * b.lines.length);
-        strokes.push(makeStroke(rnd, palette, {
+        add({
           x: b.x + lay.padX + rnd() * (b.w - lay.padX * 2),
           y: b.y + lay.padY + lay.lh * (line + 0.5),
-          angle: (rnd() - 0.5) * 1.4,
-          len: 50 + rnd() * 90,
-          width: 8 + rnd() * 12,
-          over: true,
-          dry: 0.45 + rnd() * 0.3,
-        }));
+          angle: (rnd() - 0.5) * 1.4, len: 50 + rnd() * 90, width: 8 + rnd() * 12,
+          over: true, dry: 0.45 + rnd() * 0.3,
+        });
       }
     });
     return strokes;
   }
 
-  function makeStroke(rnd, palette, s) {
+  // A stroke sitting on the bubble's edge. Over-strokes hug the edge and bite
+  // in a little (more at high paint amounts); under-strokes can sit further out.
+  function edgeStroke(b, u, rnd, a, over) {
+    const e = edgePoint(b, u);
+    const width = (12 + rnd() * 38) * (0.8 + 0.4 * a);
+    const len = (60 + rnd() * 210) * (0.7 + 0.6 * a);
+    const diagonal = over ? a > 0.75 && rnd() < 0.15 : rnd() < 0.25;
+    const angle = Math.atan2(e.ty, e.tx) + (diagonal ? (rnd() < 0.5 ? -1 : 1) * (0.5 + rnd() * 0.7) : (rnd() - 0.5) * (over ? 0.16 : 0.6));
+    const offset = over
+      ? width / 2 - (3 + rnd() * (5 + 34 * a * a)) * (e.horizontal ? 0.6 : 1)
+      : -width * 0.3 + rnd() * width * 1.4;
+    return { x: e.x + e.nx * offset, y: e.y + e.ny * offset, angle, len, width, over, bend: over ? 0.06 : 0.3 };
+  }
+
+  function makeStroke(rnd, palette, look, s) {
+    const tool = s.tool || weighted(rnd, look.hand.knife || look.hand.dab
+      ? { bristle: look.hand.bristle, knife: look.hand.knife, dab: look.hand.dab }
+      : { bristle: 1 });
     const c1 = palette[Math.floor(rnd() * palette.length)];
     const c2 = palette[Math.floor(rnd() * palette.length)];
-    return {
+    const stroke = {
+      bend: 0.25,
       ...s,
-      color: c1,
+      type: tool === "dab" ? "bristle" : tool,
+      color: tool === "scribble" ? saturate(c1, 1.5) : c1,
       color2: c2,
-      dry: s.dry ?? 0.12 + rnd() * 0.45,
+      dry: s.dry ?? 0.1 + rnd() * 0.5,
       seed: Math.floor(rnd() * 2 ** 31),
-      image: strokeImages.length && rnd() < 0.3 ? strokeImages[Math.floor(rnd() * strokeImages.length)] : null,
+      image: tool === "bristle" && strokeImages.length && rnd() < 0.3 ? strokeImages[Math.floor(rnd() * strokeImages.length)] : null,
     };
+    if (tool === "dab") {
+      // Short, loaded, fat: impasto dabs.
+      stroke.len = Math.min(stroke.len, stroke.width * (1.2 + rnd()));
+      stroke.width *= 1.3;
+      stroke.dry = 0.05 + rnd() * 0.15;
+      stroke.bend = 0.5;
+    }
+    if (tool === "knife") {
+      stroke.len *= 0.8;
+    }
+    return stroke;
   }
 
   // A point on the bubble's edge, with the outward normal and the edge tangent.
@@ -706,6 +810,342 @@
     c.restore();
   }
 
+  function paintStroke(c, s) {
+    if (s.type === "knife") return drawKnife(c, s);
+    if (s.type === "scribble") return drawScribble(c, s);
+    if (s.type === "reveal") return drawReveal(c, s);
+    return drawStroke(c, s);
+  }
+
+  // Palette knife: a flat slab with one hard straight edge, a ragged trailing
+  // edge, drag streaks through it and a lip of paint where the knife lifted.
+  function drawKnife(c, s) {
+    const rnd = mulberry32(s.seed);
+    const L = s.len;
+    const Wd = s.width;
+    const skew = (rnd() - 0.5) * Wd * 0.3;
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    // Straight leading edge, rounded lifted end, ragged trailing edge, soft start.
+    c.beginPath();
+    c.moveTo(-L / 2, -Wd / 2);
+    c.lineTo(L / 2 + skew, -Wd / 2);
+    c.quadraticCurveTo(L / 2 + skew + Wd * 0.35, 0, L / 2 - Wd * 0.1, Wd / 2);
+    const steps = 14;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      c.lineTo(L / 2 - Wd * 0.1 - t * (L - Wd * 0.4), Wd / 2 + (rnd() - 0.5) * Wd * 0.2);
+    }
+    c.quadraticCurveTo(-L / 2 - Wd * 0.25, Wd * 0.1, -L / 2, -Wd / 2);
+    c.closePath();
+    const grad = c.createLinearGradient(-L / 2, 0, L / 2, 0);
+    grad.addColorStop(0, rgba(s.color, 0.96));
+    grad.addColorStop(0.7, rgba(mix(s.color, s.color2, 0.35), 0.9));
+    grad.addColorStop(1, rgba(s.color2, 0.7));
+    c.fillStyle = grad;
+    c.fill();
+    c.clip();
+
+    // Drag streaks: the other colour pulled through the slab.
+    const n = Math.round(Wd / 2.5);
+    for (let k = 0; k < n; k++) {
+      const y = -Wd / 2 + rnd() * Wd;
+      const shade = (rnd() - 0.5) * 70;
+      const base = rnd() < 0.5 ? s.color2 : s.color;
+      c.strokeStyle = rgba([base[0] + shade, base[1] + shade, base[2] + shade], 0.2 + rnd() * 0.45);
+      c.lineWidth = 0.7 + rnd() * 2.2;
+      c.beginPath();
+      let x = -L / 2 + rnd() * L * 0.3;
+      const end = L / 2 - rnd() * L * 0.3;
+      c.moveTo(x, y);
+      while (x < end) {
+        x += 10 + rnd() * 30;
+        const yy = y + (rnd() - 0.5) * 1.5;
+        if (rnd() < 0.2) c.moveTo(x, yy);
+        else c.lineTo(x, yy);
+      }
+      c.stroke();
+    }
+    // Bare patches where the knife skipped.
+    for (let k = 0; k < 3 + rnd() * 6; k++) {
+      c.fillStyle = rgba(mix(s.color, [255, 255, 255], 0.25), 0.25 + rnd() * 0.3);
+      c.beginPath();
+      c.ellipse(-L / 2 + rnd() * L, -Wd / 2 + rnd() * Wd, 3 + rnd() * 10, 1 + rnd() * 3, 0, 0, Math.PI * 2);
+      c.fill();
+    }
+    c.restore();
+
+    // Sharp highlight on the hard edge, dark lip at the lifted end.
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    c.strokeStyle = "rgba(255,255,255,0.45)";
+    c.lineWidth = 1.6;
+    c.beginPath();
+    c.moveTo(-L / 2 + 4, -Wd / 2 + 1);
+    c.lineTo(L / 2 + skew - 4, -Wd / 2 + 1);
+    c.stroke();
+    c.strokeStyle = rgba(mix(s.color2, [0, 0, 0], 0.4), 0.5);
+    c.lineWidth = 3;
+    c.beginPath();
+    c.moveTo(L / 2 + skew, -Wd / 2);
+    c.quadraticCurveTo(L / 2 + skew * 0.5 + 4, 0, L / 2 - L * 0.04, Wd / 2);
+    c.stroke();
+    c.restore();
+  }
+
+  // Oil-pastel scribble: a waxy line (zigzag, loop or wave) broken up by the canvas grain.
+  const scribbleCanvas = document.createElement("canvas");
+  function drawScribble(c, s) {
+    const rnd = mulberry32(s.seed);
+    const size = s.size;
+    const pts = [];
+    if (s.kind === "zigzag") {
+      const n = 5 + Math.floor(rnd() * 8);
+      for (let i = 0; i <= n; i++) {
+        pts.push([-size / 2 + (i / n) * size + (rnd() - 0.5) * 12, (i % 2 ? -1 : 1) * size * (0.15 + rnd() * 0.2)]);
+      }
+    } else if (s.kind === "loop") {
+      const turns = 2 + rnd() * 3;
+      const r = size * (0.12 + rnd() * 0.1);
+      for (let t = 0; t <= turns * Math.PI * 2; t += 0.35) {
+        pts.push([-size / 2 + (t / (turns * Math.PI * 2)) * size + Math.cos(t) * r, Math.sin(t) * r * (0.6 + rnd() * 0.3)]);
+      }
+    } else {
+      const k = 1 + rnd() * 2.5;
+      for (let x = -size / 2; x <= size / 2; x += 10) {
+        pts.push([x, Math.sin((x / size) * Math.PI * 2 * k) * size * 0.14 + (rnd() - 0.5) * 4]);
+      }
+    }
+
+    const dim = Math.ceil(size * 1.1 + s.width * 4);
+    scribbleCanvas.width = dim;
+    scribbleCanvas.height = dim;
+    const g = scribbleCanvas.getContext("2d");
+    g.translate(dim / 2, dim / 2);
+    g.lineCap = "round";
+    g.lineJoin = "round";
+    g.strokeStyle = rgba(s.color, 0.95);
+    g.lineWidth = s.width;
+    g.beginPath();
+    g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i][0] + pts[i + 1][0]) / 2;
+      const my = (pts[i][1] + pts[i + 1][1]) / 2;
+      g.quadraticCurveTo(pts[i][0], pts[i][1], mx, my);
+    }
+    g.lineTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    g.stroke();
+    // Wax skipping over the weave.
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = "destination-out";
+    g.fillStyle = g.createPattern(speckle(), "repeat");
+    g.translate(-rnd() * 256, -rnd() * 256);
+    g.fillRect(0, 0, dim + 256, dim + 256);
+
+    c.save();
+    c.translate(s.x, s.y);
+    c.rotate(s.angle);
+    c.drawImage(scribbleCanvas, -dim / 2, -dim / 2);
+    c.restore();
+  }
+
+  // The painting grows over one end of a bubble: the painting itself is drawn
+  // back on top through a ragged brush-shaped mask, hiding part of the words.
+  const revealCanvas = document.createElement("canvas");
+  function drawReveal(c, s) {
+    const b = s.bubble;
+    const rnd = mulberry32(s.seed);
+    const pad = 80;
+    const bx = Math.floor(b.x - pad);
+    const by = Math.floor(b.y - pad);
+    revealCanvas.width = Math.ceil(b.w + pad * 2);
+    revealCanvas.height = Math.ceil(b.h + pad * 2);
+    const g = revealCanvas.getContext("2d");
+    g.translate(-bx, -by);
+    // On the left only the bubble's edge goes under, never the first word.
+    const depth = s.side === "right" ? s.f * b.w : Math.min(s.f * b.w, s.padX * 1.1);
+    const edgeX = s.side === "right" ? b.x + b.w - depth : b.x + depth;
+    const dir = s.side === "right" ? 1 : -1;
+
+    // Solid body inside the bubble, from the ragged edge to its end.
+    g.fillStyle = "#fff";
+    g.save();
+    bubblePath(g, b.x, b.y, b.w, b.h, s.radius, b.tail, s.scale);
+    g.clip();
+    const x0 = edgeX + dir * 18;
+    const x1 = (s.side === "right" ? b.x + b.w : b.x) + dir * 30;
+    g.fillRect(Math.min(x0, x1), b.y - 30, Math.abs(x1 - x0), b.h + 60);
+    g.restore();
+    // Ragged, brushy edge.
+    const white = [255, 255, 255];
+    for (let k = 0; k < 6 + rnd() * 5; k++) {
+      drawStroke(g, {
+        x: edgeX + dir * (rnd() * 30 - 5), y: b.y - 20 + rnd() * (b.h + 40),
+        angle: Math.PI / 2 + (rnd() - 0.5) * 0.9, len: b.h * (0.5 + rnd() * 0.9),
+        width: 24 + rnd() * 36, color: white, color2: white, dry: 0.15 + rnd() * 0.4,
+        seed: Math.floor(rnd() * 2 ** 31), bend: 0.3,
+      });
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = "source-in";
+    g.drawImage(state.painting, -bx, -by);
+    c.drawImage(revealCanvas, bx, by);
+  }
+
+  // ── compositions ───────────────────────────────────────────────────────────
+  // full:   the painting fills the frame.
+  // torn:   bare ground where the words sit, painting beyond a torn, brushy edge.
+  // island: the painting is a ragged patch on bare ground, bubbles overhanging it.
+  function buildMask(look, lay) {
+    const m = document.createElement("canvas");
+    m.width = W;
+    m.height = H;
+    const g = m.getContext("2d");
+    const rnd = mulberry32(state.strokeSeed ^ 0x27d4eb2f);
+    g.fillStyle = "#fff";
+    const blockTop = lay.top;
+    const blockBottom = lay.top + lay.height;
+
+    if (look.composition === "island") {
+      const x0 = 40 + rnd() * 90;
+      const x1 = W - 40 - rnd() * 90;
+      const y0 = Math.min(blockTop + 40, 80 + rnd() * 140);
+      const y1 = Math.max(blockBottom - 40, H - 80 - rnd() * 140);
+      g.fillRect(x0 + 70, y0 + 70, x1 - x0 - 140, y1 - y0 - 140);
+      raggedEdge(g, x0, y0, x1, y0, 0, 1, rnd, 200);
+      raggedEdge(g, x1, y0, x1, y1, -1, 0, rnd, 200);
+      raggedEdge(g, x1, y1, x0, y1, 0, -1, rnd, 200);
+      raggedEdge(g, x0, y1, x0, y0, 1, 0, rnd, 200);
+      return m;
+    }
+
+    // torn
+    if (lay.space === "top") {
+      const y = clampN(blockBottom - 40 - rnd() * 110, H * 0.3, H * 0.72);
+      raggedEdge(g, -40, y, W + 40, y, 0, 1, rnd);
+    } else if (lay.space === "bottom") {
+      const y = clampN(blockTop + 40 + rnd() * 110, H * 0.28, H * 0.7);
+      raggedEdge(g, -40, y, W + 40, y, 0, -1, rnd);
+    } else {
+      // A bare band torn through the middle of the painting.
+      const yA = Math.max(60, blockTop + 30 + rnd() * 60);
+      const yB = Math.min(H - 60, blockBottom - 30 - rnd() * 60);
+      raggedEdge(g, -40, yA, W + 40, yA, 0, -1, rnd);
+      raggedEdge(g, -40, yB, W + 40, yB, 0, 1, rnd);
+    }
+    return m;
+  }
+
+  // Brushy edge along a→b; (nx, ny) points into the paint.
+  function raggedEdge(g, ax, ay, bx, by, nx, ny, rnd, depth = 2000) {
+    const white = [255, 255, 255];
+    const len = Math.hypot(bx - ax, by - ay);
+    const tx = (bx - ax) / len;
+    const ty = (by - ay) / len;
+    const along = Math.atan2(ty, tx);
+    const outward = Math.atan2(-ny, -nx);
+    // Solid body behind the brushwork, with a jagged front so no straight line shows.
+    g.beginPath();
+    let off = 60;
+    for (let d = -40; d <= len + 40; d += 12) {
+      off = clampN(off + (rnd() - 0.5) * 22, 35, 110);
+      const x = ax + tx * d + nx * off;
+      const y = ay + ty * d + ny * off;
+      if (d === -40) g.moveTo(x, y);
+      else g.lineTo(x, y);
+    }
+    g.lineTo(bx + tx * 40 + nx * depth, by + ty * 40 + ny * depth);
+    g.lineTo(ax - tx * 40 + nx * depth, ay - ty * 40 + ny * depth);
+    g.closePath();
+    g.fill();
+    for (let d = -30; d < len + 30; d += 16 + rnd() * 30) {
+      const flick = rnd() < 0.16;
+      const off = flick ? -(10 + rnd() * 40) : -10 + rnd() * 70;
+      const len2 = flick ? 60 + rnd() * 130 : 70 + rnd() * 200;
+      const s = {
+        x: ax + tx * d + nx * off, y: ay + ty * d + ny * off,
+        angle: flick ? outward + (rnd() - 0.5) * 1.3 : along + (rnd() - 0.5) * 0.6,
+        len: len2, width: flick ? 10 + rnd() * 18 : 26 + rnd() * 46,
+        color: white, color2: white, dry: 0.15 + rnd() * 0.5,
+        seed: Math.floor(rnd() * 2 ** 31), bend: 0.3,
+      };
+      if (rnd() < 0.25) drawKnife(g, s);
+      else drawStroke(g, s);
+      // Loose flecks out on the bare ground.
+      if (rnd() < 0.22) {
+        const dist = 30 + rnd() * 170;
+        drawStroke(g, {
+          x: ax + tx * d - nx * dist, y: ay + ty * d - ny * dist,
+          angle: rnd() * Math.PI, len: 14 + rnd() * 40, width: 8 + rnd() * 16,
+          color: white, color2: white, dry: 0.1, seed: Math.floor(rnd() * 2 ** 31), bend: 0.5,
+        });
+      }
+      // Occasional bite back into the paint.
+      if (rnd() < 0.05) {
+        g.save();
+        g.globalCompositeOperation = "destination-out";
+        drawStroke(g, {
+          x: ax + tx * d + nx * (40 + rnd() * 40), y: ay + ty * d + ny * (40 + rnd() * 40),
+          angle: along + (rnd() - 0.5), len: 40 + rnd() * 80, width: 14 + rnd() * 20,
+          color: white, color2: white, dry: 0.3, seed: Math.floor(rnd() * 2 ** 31), bend: 0.3,
+        });
+        g.restore();
+      }
+    }
+  }
+
+  let bgCache = { key: "", canvas: null };
+  function background(look, lay) {
+    const key = `${state.paintingId}|${state.strokeSeed}|${look.composition}|${Math.round(lay.top)}|${Math.round(lay.height)}|${lay.space}`;
+    if (bgCache.key === key) return bgCache.canvas;
+    const c = bgCache.canvas || document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const g = c.getContext("2d");
+    if (look.composition === "full") {
+      g.drawImage(state.painting, 0, 0);
+    } else {
+      g.fillStyle = rgba(look.ground, 1);
+      g.fillRect(0, 0, W, H);
+      g.drawImage(grain(), 0, 0, W, H);
+      const t = document.createElement("canvas");
+      t.width = W;
+      t.height = H;
+      const tg = t.getContext("2d");
+      tg.drawImage(buildMask(look, lay), 0, 0);
+      tg.globalCompositeOperation = "source-in";
+      tg.drawImage(state.painting, 0, 0);
+      g.drawImage(t, 0, 0);
+    }
+    bgCache = { key, canvas: c };
+    bgLumData = g.getImageData(0, 0, W, H).data;
+    return c;
+  }
+
+  let bgLumData = null;
+  function bgLuminance(x, y) {
+    if (!bgLumData) return 0;
+    const i = (clampN(Math.round(y), 0, H - 1) * W + clampN(Math.round(x), 0, W - 1)) * 4;
+    return 0.299 * bgLumData[i] + 0.587 * bgLumData[i + 1] + 0.114 * bgLumData[i + 2];
+  }
+
+  let speckleCanvas = null;
+  function speckle() {
+    if (speckleCanvas) return speckleCanvas;
+    speckleCanvas = document.createElement("canvas");
+    speckleCanvas.width = speckleCanvas.height = 256;
+    const g = speckleCanvas.getContext("2d");
+    const img = g.createImageData(256, 256);
+    const rnd = mulberry32(11);
+    for (let i = 0; i < img.data.length; i += 4) {
+      img.data[i + 3] = rnd() < 0.3 ? 120 + rnd() * 135 : 0;
+    }
+    g.putImageData(img, 0, 0);
+    return speckleCanvas;
+  }
+
   // ── render ─────────────────────────────────────────────────────────────────
   let frame = 0;
   function scheduleRender() {
@@ -717,12 +1157,14 @@
   }
 
   function render() {
+    const look = pickLook();
     const lay = layout();
-    const strokes = generateStrokes(lay);
-    drawBackground();
-    for (const s of strokes) if (!s.over) drawStroke(ctx, s);
+    const strokes = generateStrokes(lay, look);
+    if (state.painting) ctx.drawImage(background(look, lay), 0, 0);
+    else drawPlain();
+    for (const s of strokes) if (!s.over) paintStroke(ctx, s);
     drawItems(lay);
-    for (const s of strokes) if (s.over) drawStroke(ctx, s);
+    for (const s of strokes) if (s.over) paintStroke(ctx, s);
     if (state.painting) {
       // A whisper of canvas grain over everything, so the bubbles sit in the paint.
       ctx.save();
@@ -801,6 +1243,7 @@
     const dh = img.naturalHeight * s;
     g.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
     state.painting = c;
+    state.paintingId++;
     state.paintData = g.getImageData(0, 0, W, H).data;
   }
 
@@ -900,7 +1343,7 @@
     const spaces = ["top", "centre", "bottom"];
     return {
       image: c.toDataURL("image/jpeg", 0.92),
-      scene: { emotional_core: "Demo painting: no AI was used.", mood: "demo", negative_space: spaces[Math.floor(rnd() * 3)] },
+      scene: { emotional_core: "Demo painting: random paint, not AI.", mood: "demo", negative_space: spaces[Math.floor(rnd() * 3)] },
     };
   }
 
@@ -930,6 +1373,18 @@
       return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
   }
+  function weighted(rnd, table) {
+    const keys = Object.keys(table);
+    const total = keys.reduce((sum, k) => sum + Math.max(0, table[k]), 0);
+    let r = rnd() * total;
+    for (const k of keys) {
+      r -= Math.max(0, table[k]);
+      if (r <= 0 && table[k] > 0) return k;
+    }
+    return keys.find((k) => table[k] > 0) || keys[0];
+  }
+  function mix(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+  function clampN(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
   function randSeed() { return Math.floor(Math.random() * 2 ** 31); }
   function clamp(v) { return Math.max(0, Math.min(255, v)); }
   function rgba(c, a) { return `rgba(${clamp(c[0]) | 0},${clamp(c[1]) | 0},${clamp(c[2]) | 0},${a})`; }
@@ -941,6 +1396,7 @@
     addMessage(state.messages.length, last?.side === "me" ? "them" : "me");
   });
   els.style.addEventListener("change", () => { state.style = els.style.value; scheduleRender(); });
+  els.composition.addEventListener("change", () => { state.composition = els.composition.value; scheduleRender(); });
   els.mood.addEventListener("change", () => { state.mood = els.mood.value; });
   els.time.addEventListener("input", () => { state.startTime = els.time.value; scheduleRender(); });
   els.meta.addEventListener("change", () => { state.showMeta = els.meta.checked; scheduleRender(); });
@@ -953,7 +1409,7 @@
   renderExamples();
   renderList();
   render();
-  if (DEMO) setStatus("Demo mode: paintings are generated locally, no AI.");
+  if (DEMO) setStatus("Demo mode: random local paint, not AI, so it won't match your words.");
   loadStrokeImages();
   // Canvas text needs the web fonts (Malayalam especially) before it looks right.
   Promise.all([

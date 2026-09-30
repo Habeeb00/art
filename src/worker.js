@@ -2,7 +2,10 @@
 // conversation → scene JSON (Llama 3.1 8B) → painting (FLUX.1 schnell).
 // Nothing is stored: messages pass through and are gone.
 
-const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+// The scene writer decides whether the painting reads emotionally, so it defaults
+// to Llama 3.3 70B. It costs more of the free daily allowance than 8B; set
+// SCENE_MODEL = "@cf/meta/llama-3.1-8b-instruct" in wrangler.toml for more paintings a day.
+const DEFAULT_SCENE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 const IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
 const MAX_MESSAGES = 20;
@@ -14,8 +17,8 @@ const SPACES = ["top", "centre", "bottom"];
 // The house style. Tune this until 8 out of 10 results feel like the same painter.
 const STYLE =
   "expressive oil painting on canvas, thick impasto, visible bristle and palette knife marks, " +
-  "naive expressionist figures, bold saturated colour, loose broken edges, unfinished raw areas, " +
-  "hand-painted, no text, no letters";
+  "naive expressionist figures with simple faces and readable body language, bold saturated colour, " +
+  "loose broken edges, unfinished raw areas, hand-painted, emotional storytelling, no text, no letters";
 
 const SPACE_HINT = {
   top: "the upper third is calm open sky or loose empty brushwork with no figures",
@@ -24,24 +27,60 @@ const SPACE_HINT = {
 };
 
 const SCENE_PROMPT = `You are the art director for a painter who turns text conversations into
-expressive oil paintings. You never illustrate the literal words. You paint
-what sits underneath them: the tension, the tenderness, the distance, the
-thing nobody said. Conversations may be in English, Manglish or Malayalam,
-and may be about romance, family, friends, grief or messages never sent.
+expressive oil paintings. A stranger scrolling past must FEEL what is going on
+between these people in one second, without reading a single message.
+
+How to find the painting:
+1. Work out what is really happening: who wants what, who is pulling away,
+   who is holding back, what nobody is saying.
+2. Show it as ONE clear human moment: one or two simple, naive figures whose
+   bodies carry the feeling. Use gesture and distance: backs turned, a hand
+   reaching and not arriving, a wide gap between them, one lying in the grass,
+   a hug that doesn't hold, one figure walking away small in the distance,
+   someone sitting alone beside an empty space.
+3. Add ONE symbolic detail that makes it land: an arrow through a heart, a door
+   left open, a kite caught in a tree, a bridge that doesn't meet in the middle,
+   a wilting flower, a second empty chair, rain falling on only one of them.
+4. Let colour, light and weather carry the mood: warm golds and pinks for
+   tenderness, clashing reds and oranges for anger, cold blues and big empty
+   space for distance, faded yellows and turquoise for nostalgia, deep violets
+   and night for grief.
+5. Use ordinary places people know: a rooftop, a bus stop, a playground, a
+   kitchen, a beach at dusk, a train window, a hospital corridor. If the
+   conversation uses Malayalam or Manglish, paint Kerala: paddy fields,
+   coconut palms, a veranda, monsoon rain, a KSRTC bus.
+
 Return ONLY valid JSON, no preamble, no markdown:
 {
-  "emotional_core": "one sentence on what is really happening",
+  "subtext": "one plain sentence: what is really going on",
+  "emotional_core": "a short poetic line, max 12 words, naming the unsaid feeling",
   "mood": "one or two words",
   "negative_space": "top | centre | bottom",
-  "image_prompt": "40-70 words describing the painting's subject, setting, colours and composition"
+  "image_prompt": "50-80 words. Start with the figures and exactly what their bodies are doing, then the symbolic detail, then the setting, light and colour palette."
 }
 
 Rules:
-- No text, letters, phones, screens or speech bubbles.
-- Prefer metaphor over literal scenes.
+- No text, letters, phones, screens or speech bubbles in the painting, and
+  never mention a conversation, chat or message in image_prompt.
 - Leave a calmer area at the negative_space position.
 - If the conversation is sexual, hateful, or romantic/sexual involving a
   minor, return {"refused": true}.`;
+
+// One worked example anchors the model on concrete, readable scenes.
+const EXAMPLE_IN = `Conversation:
+Them: I love you but we shouldn't speak
+Me: okay
+Me: if that's what you want
+
+The mood should lean tender.
+Return the JSON now.`;
+const EXAMPLE_OUT = JSON.stringify({
+  subtext: "They still love each other, but one has decided it has to end, and the other is pretending to accept it.",
+  emotional_core: "Loved, and still asked to go quiet.",
+  mood: "tender grief",
+  negative_space: "top",
+  image_prompt: "A small figure in a white shirt lies curled on their side in a golden wheat field, one arm stretched toward nothing, a thin red arrow standing upright from their chest. Far off at the horizon, a second tiny figure walks away. Wind flattens the tall yellow grass. Pale turquoise sky with pink streaks, late afternoon light, warm ochres against cold blue.",
+});
 
 const DEFAULT_SCENES = {
   tender: "two small figures sitting close on a hillside at dusk, one leaning into the other, warm ochre grass, soft pink and violet sky, a single tree bending over them",
@@ -131,12 +170,14 @@ async function writeScene(env, messages, mood) {
 
   let raw = "";
   try {
-    const out = await env.AI.run(TEXT_MODEL, {
+    const out = await env.AI.run(env.SCENE_MODEL || DEFAULT_SCENE_MODEL, {
       messages: [
         { role: "system", content: SCENE_PROMPT },
+        { role: "user", content: EXAMPLE_IN },
+        { role: "assistant", content: EXAMPLE_OUT },
         { role: "user", content: `Conversation:\n${transcript}\n\n${moodLine}\nReturn the JSON now.` },
       ],
-      max_tokens: 400,
+      max_tokens: 500,
       temperature: 0.8,
     });
     raw = out?.response ?? "";
@@ -158,10 +199,11 @@ function normaliseScene(s, mood) {
   const fallbackMood = mood === "auto" ? "distant" : mood;
   const prompt = typeof s?.image_prompt === "string" ? s.image_prompt.trim() : "";
   const scene = {
-    emotional_core: str(s?.emotional_core, 200) || "Something is being said around, not through.",
+    subtext: str(s?.subtext, 300),
+    emotional_core: str(s?.emotional_core, 120) || "Something is being said around, not through.",
     mood: str(s?.mood, 30) || fallbackMood,
     negative_space: SPACES.includes(s?.negative_space) ? s.negative_space : s?.negative_space === "center" ? "centre" : "top",
-    image_prompt: prompt.length >= 20 ? prompt.slice(0, 700) : DEFAULT_SCENES[fallbackMood],
+    image_prompt: prompt.length >= 20 ? prompt.slice(0, 900) : DEFAULT_SCENES[fallbackMood],
   };
   // Belt and braces: strip anything that invites lettering.
   scene.image_prompt = scene.image_prompt.replace(/\b(text|letters?|words?|phones?|screens?|speech bubbles?|captions?|signs?)\b/gi, "").replace(/\s{2,}/g, " ");
@@ -194,7 +236,7 @@ async function checkLimit(request, env) {
   const used = Number(await env.LIMITS.get(key)) || 0;
   if (used >= limit) {
     return json(
-      { error: `You've used your ${limit} paintings for today. Repaint strokes is still free. New ones open at 5:30 AM.`, limited: true },
+      { error: `You've used your ${limit} paintings for today. Remix is still free. New ones open at 5:30 AM.`, limited: true },
       429,
     );
   }

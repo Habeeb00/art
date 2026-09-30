@@ -8,13 +8,16 @@ directory = "./public"
 binding = "ASSETS"
 run_worker_first = ["/api/*"]
 
-# Workers AI: Llama 3.1 8B (scene) + FLUX.1 schnell (painting), free daily allowance.
+# Workers AI: Llama (scene, see SCENE_MODEL) + FLUX.1 schnell (painting), free daily allowance.
 [ai]
 binding = "AI"
 
 [vars]
 # Paintings per IP per day. Only enforced when the LIMITS KV namespace is bound.
 DAILY_LIMIT = "3"
+# Scene writer. 70B reads emotion far better; 8B stretches the free allowance further.
+SCENE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+# SCENE_MODEL = "@cf/meta/llama-3.1-8b-instruct"
 
 # Optional per-IP rate limit. Create it with:
 #   npx wrangler kv namespace create LIMITS

@@ -53,14 +53,37 @@ at 00:00 UTC / 5:30 AM IST).
 | `wrangler.toml` | AI binding, static assets, optional KV |
 | `src/worker.js` | `/api/paint`: validate → rate limit → scene → painting. The house **style phrase** and **scene prompt** live at the top; tune them. |
 | `public/index.html` | Page, composer, preview |
-| `public/app.js` | Bubble layout (WhatsApp / iMessage), bristle paint-over strokes, download |
+| `public/app.js` | Bubble layout (WhatsApp / iMessage), compositions, brush tools, download |
 | `public/strokes/` | Optional scanned brush-stroke PNGs, see its README |
+
+## How each piece varies
+
+Every painting, and every **Remix**, picks:
+
+- **A composition**: full painting; torn edge (bare black or raw-canvas ground
+  where the words sit, the painting beyond a brushy torn edge); or a paint island
+  with bubbles hanging off its edges. Choose one or leave it on *Surprise me*.
+- **A hand**: its own mix of bristle brush, palette knife, impasto dabs and
+  oil-pastel scribbles.
+- **A treatment per bubble**: left clean, worked along one stretch of edge, a
+  cluster at one corner, a halo underneath, scribbled on, or partly swallowed
+  by the painting (the tail end of the line goes under, so it still reads).
+
+## Scenes that read
+
+The scene writer is asked for one readable human moment (figures whose body
+language carries the feeling), one symbolic detail, and colour and weather
+that match the mood, anchored by a worked example. It defaults to Llama 3.3
+70B (`SCENE_MODEL` in `wrangler.toml`), which reads subtext far better than 8B
+but uses more of the free daily allowance. Switch back to 8B for more
+paintings a day. `?demo` paintings are random local paint and never match the
+words.
 
 ## Tuning
 
 - **Style phrase** (`STYLE` in `src/worker.js`): tune until 8 of 10 results feel like the same painter.
 - **Paint amount** slider: stroke count and how far strokes bite into bubbles. Above ~60%, strokes occasionally cross a word.
-- **Repaint strokes** is instant and free (new seed). **New painting** spends allowance.
+- **Remix** is instant and free (new strokes and composition). **New painting** spends allowance.
 
 ## Privacy
 
